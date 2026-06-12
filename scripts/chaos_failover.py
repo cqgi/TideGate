@@ -50,15 +50,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 recovered_at = time.monotonic()
                 consecutive_b = 0
 
-            response = _chat(client, args.gateway_url, args.api_key)
             total += 1
-            if response.status_code == 200:
+            try:
+                response = _chat(client, args.gateway_url, args.api_key)
+                status_code = response.status_code
+                route = response.headers.get("X-TideGate-Route", "none")
+            except httpx.HTTPError as exc:
+                status_code = 599
+                route = f"error:{exc.__class__.__name__}"
+            if status_code == 200:
                 ok += 1
             if injected_at is not None and recovered_at is None:
                 during_total += 1
-                if response.status_code == 200:
+                if status_code == 200:
                     during_ok += 1
-            route = response.headers.get("X-TideGate-Route", "none")
             routes[route] = routes.get(route, 0) + 1
             if injected_at is not None and recovered_at is None and route.startswith("mock-b/"):
                 consecutive_b += 1
@@ -93,10 +98,13 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _chat(client: httpx.Client, gateway_url: str, api_key: str) -> httpx.Response:
+    # DECISION: REWORK-M4-3 keeps chaos numbers about routing, not cache hits; unique
+    # prompts preserve L1/L2 isolation without requiring a special tenant.
+    prompt = f"hi chaos {time.monotonic_ns()}"
     return client.post(
         f"{gateway_url}/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": "chat-large", "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": "chat-large", "messages": [{"role": "user", "content": prompt}]},
     )
 
 

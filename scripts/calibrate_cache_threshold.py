@@ -50,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     similarities = [(float(np.dot(vectors[pair.a], vectors[pair.b])), pair.label) for pair in pairs]
     rows = _scan(similarities)
     selected = _select(rows, max_false_hit=args.max_false_hit)
+    operating_points = _operating_points(rows)
     positives = sum(1 for pair in pairs if pair.label == 1)
     negatives = len(pairs) - positives
 
@@ -62,6 +63,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         negatives=negatives,
         rows=rows,
         selected=selected,
+        operating_points=operating_points,
     )
     _write_calibrated(
         Path(args.output),
@@ -73,6 +75,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         negatives=negatives,
         max_false_hit=args.max_false_hit,
         selected=selected,
+        operating_points=operating_points,
     )
 
 
@@ -113,8 +116,8 @@ def _scan(similarities: list[tuple[float, int]]) -> list[ScanRow]:
     positives = sum(1 for _, label in similarities if label == 1)
     negatives = len(similarities) - positives
     rows: list[ScanRow] = []
-    for step in range(39):
-        tau = round(0.80 + step * 0.005, 3)
+    for step in range(79):
+        tau = round(0.60 + step * 0.005, 3)
         hits = sum(1 for score, label in similarities if label == 1 and score >= tau)
         false_hits = sum(1 for score, label in similarities if label == 0 and score >= tau)
         rows.append(
@@ -137,6 +140,26 @@ def _select(rows: list[ScanRow], *, max_false_hit: float) -> ScanRow:
     return max(eligible, key=lambda row: (row.hit_rate, row.tau))
 
 
+def _operating_points(rows: list[ScanRow]) -> list[dict[str, float | str]]:
+    budgets = [
+        ("conservative", 0.01),
+        ("balanced", 0.03),
+        ("aggressive", 0.05),
+    ]
+    points: list[dict[str, float | str]] = []
+    for name, max_fpr in budgets:
+        row = _select(rows, max_false_hit=max_fpr)
+        points.append(
+            {
+                "name": name,
+                "tau": row.tau,
+                "expected_fpr": round(row.false_hit_rate, 6),
+                "expected_recall": round(row.hit_rate, 6),
+            }
+        )
+    return points
+
+
 def _print_report(
     *,
     pairs_path: Path,
@@ -147,6 +170,7 @@ def _print_report(
     negatives: int,
     rows: list[ScanRow],
     selected: ScanRow,
+    operating_points: list[dict[str, float | str]],
 ) -> None:
     print(f"pairs={pairs} positives={positives} negatives={negatives}")
     print(f"model={model}")
@@ -164,6 +188,14 @@ def _print_report(
         f"\thit_rate={selected.hit_rate:.4f}"
         f"\tfalse_hit_rate={selected.false_hit_rate:.4f}"
     )
+    print("operating_points")
+    for point in operating_points:
+        print(
+            f"{point['name']}"
+            f"\ttau={float(point['tau']):.3f}"
+            f"\texpected_recall={float(point['expected_recall']):.4f}"
+            f"\texpected_fpr={float(point['expected_fpr']):.4f}"
+        )
 
 
 def _write_calibrated(
@@ -177,9 +209,15 @@ def _write_calibrated(
     negatives: int,
     max_false_hit: float,
     selected: ScanRow,
+    operating_points: list[dict[str, float | str]],
 ) -> None:
     payload = {
-        "cache": {"l2": {"similarity_threshold": selected.tau}},
+        "cache": {
+            "l2": {
+                "similarity_threshold": selected.tau,
+                "operating_points": operating_points,
+            }
+        },
         "calibration": {
             "model": model,
             "pairs": str(pairs_path),

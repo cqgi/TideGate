@@ -20,6 +20,8 @@ from tests.integration.conftest import (
 )
 
 OTHER_API_KEY = "<other key>"
+AGGRESSIVE_API_KEY = "<aggressive key>"
+CONSERVATIVE_API_KEY = "<conservative key>"
 
 
 @pytest.mark.integration
@@ -196,6 +198,64 @@ def test_stale_cache_degrades_after_upstream_exhaustion(
     assert stale.headers["X-TideGate-Degraded"] == "stale-cache"
 
 
+@pytest.mark.integration
+def test_l2_operating_point_is_tenant_selected(
+    l2_model_ready: None,
+    mock_a_proc: subprocess.Popen[str],
+    mock_b_proc: subprocess.Popen[str],
+    tmp_path: Path,
+) -> None:
+    """REWORK-M4-2."""
+    del l2_model_ready, mock_a_proc, mock_b_proc
+    reset_mock(MOCK_A_URL)
+    reset_mock(MOCK_B_URL)
+    port = 8046
+    proc = _start_gateway(_m4_l2_operating_point_config(tmp_path, port), port)
+
+    try:
+        with httpx.Client(timeout=10, trust_env=False) as client:
+            aggressive_seed = _chat(
+                client,
+                port,
+                "连续包月怎么关",
+                api_key=AGGRESSIVE_API_KEY,
+            )
+            before_aggressive = _started_total()
+            aggressive_hit = _chat(
+                client,
+                port,
+                "关闭连续订阅入口在哪",
+                api_key=AGGRESSIVE_API_KEY,
+            )
+            after_aggressive = _started_total()
+
+            conservative_seed = _chat(
+                client,
+                port,
+                "连续包月怎么关",
+                api_key=CONSERVATIVE_API_KEY,
+            )
+            before_conservative = _started_total()
+            conservative_miss = _chat(
+                client,
+                port,
+                "关闭连续订阅入口在哪",
+                api_key=CONSERVATIVE_API_KEY,
+            )
+            after_conservative = _started_total()
+    finally:
+        _stop_gateway(proc)
+
+    assert aggressive_seed.status_code == 200, aggressive_seed.text
+    assert aggressive_hit.status_code == 200, aggressive_hit.text
+    assert aggressive_hit.headers["X-TideGate-Cache"] == "hit-semantic"
+    assert after_aggressive == before_aggressive
+    assert conservative_seed.status_code == 200, conservative_seed.text
+    assert conservative_miss.status_code == 200, conservative_miss.text
+    assert conservative_miss.headers["X-TideGate-Cache"] == "miss"
+    assert after_conservative == before_conservative + 1
+
+
 def _chat(
     client: httpx.Client,
     port: int,
@@ -241,6 +301,7 @@ def _m4_l2_config(
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = port
     raw["cache"]["l2"]["similarity_threshold"] = similarity_threshold
+    raw["cache"]["l2"]["operating_points"] = []
     raw["cache"]["l2"]["stale_threshold_delta"] = 0.04
     raw["cache"]["l2"]["embed_pool_workers"] = 1
     raw["cache"]["replay_interval_ms"] = 1
@@ -256,6 +317,40 @@ def _m4_l2_config(
             }
         )
     path = tmp_path / f"gateway-m4-l2-{port}.yaml"
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def _m4_l2_operating_point_config(tmp_path: Path, port: int) -> Path:
+    raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
+    raw["server"]["port"] = port
+    raw["cache"]["l2"]["operating_points"] = [
+        {"name": "conservative", "tau": 0.70, "expected_fpr": 0.01, "expected_recall": 0.02},
+        {"name": "aggressive", "tau": 0.50, "expected_fpr": 0.05, "expected_recall": 0.25},
+    ]
+    raw["cache"]["l2"]["stale_threshold_delta"] = 0.04
+    raw["cache"]["l2"]["embed_pool_workers"] = 1
+    raw["cache"]["replay_interval_ms"] = 1
+    raw["tenants"][0]["cache"] = {"l1": True, "l2": False}
+    raw["tenants"].extend(
+        [
+            {
+                "id": "aggressive",
+                "api_key_sha256": hashlib.sha256(AGGRESSIVE_API_KEY.encode("utf-8")).hexdigest(),
+                "plan": "free",
+                "policy": "default",
+                "cache": {"l1": True, "l2": True, "l2_operating_point": "aggressive"},
+            },
+            {
+                "id": "conservative",
+                "api_key_sha256": hashlib.sha256(CONSERVATIVE_API_KEY.encode("utf-8")).hexdigest(),
+                "plan": "free",
+                "policy": "default",
+                "cache": {"l1": True, "l2": True, "l2_operating_point": "conservative"},
+            },
+        ]
+    )
+    path = tmp_path / f"gateway-m4-l2-op-{port}.yaml"
     path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
     return path
 

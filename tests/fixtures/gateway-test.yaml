@@ -77,6 +77,10 @@ cache:
   l1: { ttl_s: 60, ttl_jitter_ratio: 0.0, max_value_bytes: 262144 }
   l2:
     similarity_threshold: 0.86
+    operating_points:
+      - { name: conservative, tau: 0.955, expected_fpr: 0.003279, expected_recall: 0.016 }
+      - { name: balanced, tau: 0.925, expected_fpr: 0.019672, expected_recall: 0.028 }
+      - { name: aggressive, tau: 0.885, expected_fpr: 0.045902, expected_recall: 0.096 }
     stale_threshold_delta: 0.03
     max_temperature: 0.3
     index_capacity: 10000
@@ -111,4 +115,4 @@ tenants:
     api_key_sha256: a69b1744aae71fddcefab5a490e09c9b51bcbe22fe74ffb5b91459c4cbb4e97b
     plan: free
     policy: default
-    cache: { l1: true, l2: false }
+    cache: { l1: true, l2: false, l2_operating_point: conservative }

@@ -1,15 +1,28 @@
 cache:
   l2:
-    similarity_threshold: 0.885
+    similarity_threshold: 0.955
+    operating_points:
+    - name: conservative
+      tau: 0.955
+      expected_fpr: 0.003279
+      expected_recall: 0.016
+    - name: balanced
+      tau: 0.925
+      expected_fpr: 0.019672
+      expected_recall: 0.028
+    - name: aggressive
+      tau: 0.885
+      expected_fpr: 0.045902
+      expected_recall: 0.096
 calibration:
   model: BAAI/bge-small-zh-v1.5
   pairs: data/calibration/semcache_pairs.jsonl
-  pair_count: 284
-  positives: 182
-  negatives: 102
-  dataset_sha256: c92e3acde43aa45abf0185de52d920a60f6c88672105d09ba37897bcf06cdbf7
-  generated_at: '2026-06-12T13:07:17.885531+00:00'
+  pair_count: 555
+  positives: 250
+  negatives: 305
+  dataset_sha256: 9a8bbeb93e2fb1d942b15f922aa95bdeb81ebaf87c23b35d9101e13826458abd
+  generated_at: '2026-06-12T14:35:56.689964+00:00'
   max_false_hit: 0.01
-  tau: 0.885
-  hit_rate: 0.10989
-  false_hit_rate: 0.009804
+  tau: 0.955
+  hit_rate: 0.016
+  false_hit_rate: 0.003279

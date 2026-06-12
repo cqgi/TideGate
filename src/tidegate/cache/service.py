@@ -170,7 +170,7 @@ class CacheService:
     ) -> SemanticHit | None:
         if self._embedding is None:
             return None
-        threshold = settings.cache.l2.similarity_threshold
+        threshold = _tenant_l2_threshold(tenant, settings)
         if stale:
             threshold -= settings.cache.l2.stale_threshold_delta
         try:
@@ -185,3 +185,19 @@ class CacheService:
                 )
         except TimeoutError:
             return None
+
+
+def _tenant_l2_threshold(tenant: TenantConfig, settings: GatewayConfig) -> float:
+    points = settings.cache.l2.operating_points
+    if not points:
+        return settings.cache.l2.similarity_threshold
+    selected_name = tenant.cache.l2_operating_point
+    if selected_name is None:
+        # DECISION: REWORK-M4-2 defaults to the most conservative point because small
+        # embeddings showed weak recall at 1% FPR; false-hit budget is a tenant business
+        # decision, so the gateway exposes calibrated curve points instead of one global tau.
+        return max(points, key=lambda point: point.tau).tau
+    for point in points:
+        if point.name == selected_name:
+            return point.tau
+    return max(points, key=lambda point: point.tau).tau

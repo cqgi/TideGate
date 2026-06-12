@@ -68,6 +68,7 @@ class ModelGroupConfig(FrozenModel):
 class CacheToggleConfig(FrozenModel):
     l1: bool = True
     l2: bool = False
+    l2_operating_point: str | None = None
 
 
 class TenantConfig(FrozenModel):
@@ -139,8 +140,19 @@ class L1CacheConfig(FrozenModel):
     max_value_bytes: int = 262144
 
 
+class L2OperatingPointConfig(FrozenModel):
+    name: str
+    tau: float
+    expected_fpr: float
+    expected_recall: float
+
+
 class L2CacheConfig(FrozenModel):
     similarity_threshold: float = 0.92
+    operating_points: tuple[L2OperatingPointConfig, ...] = Field(
+        default_factory=tuple,
+        description="Tenant-selectable calibrated semantic cache thresholds",
+    )
     stale_threshold_delta: float = 0.03
     max_temperature: float = 0.3
     index_capacity: int = 100000
