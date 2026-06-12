@@ -14,6 +14,7 @@ def test_metrics_contract_names_and_labels() -> None:
     metrics.upstream_aborted.labels("mock-a", "client_disconnect").inc()
     metrics.breaker_state.labels("mock-a", "mock-gpt-large").set(2)
     metrics.breaker_transitions.labels("mock-a", "mock-gpt-large", "open").inc()
+    metrics.cache_events.labels("l1", "hit").inc()
     body, content_type = metrics.render()
     rendered = body.decode()
     assert content_type == CONTENT_TYPE_LATEST
@@ -31,3 +32,4 @@ def test_metrics_contract_names_and_labels() -> None:
         'tidegate_breaker_transitions_total{model="mock-gpt-large",provider="mock-a",'
         'to_state="open"} 1.0' in rendered
     )
+    assert 'tidegate_cache_events_total{event="hit",level="l1"} 1.0' in rendered

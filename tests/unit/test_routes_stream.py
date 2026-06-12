@@ -14,13 +14,26 @@ from tidegate.config.loader import load_config
 from tidegate.config.models import DeploymentConfig, GatewayConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
-from tidegate.core.models import ChatCompletionIn, UnifiedDelta, UnifiedRequest, Usage
+from tidegate.core.models import (
+    ChatCompletionIn,
+    UnifiedDelta,
+    UnifiedRequest,
+    UnifiedResponse,
+    Usage,
+)
 from tidegate.obs.metrics import Metrics
 from tidegate.quota.estimator import Estimate
 from tidegate.quota.service import QuotaReservation
 from tidegate.routing.ladder import RoutingLadder
 from tidegate.routing.selector import P2CSelector
 from tidegate.routing.stats import RoutingState
+
+
+def test_stale_cache_result_is_degraded_outcome() -> None:
+    """SPEC-M4-7."""
+    result = routes._ChatResult(_response(), "cache", "hit-semantic", "stale-cache")
+
+    assert routes._outcome_for(result) == "degraded"
 
 
 @pytest.mark.asyncio
@@ -104,6 +117,7 @@ class _FakeRequest:
                 metrics=metrics,
                 provider_manager=SimpleNamespace(providers=providers),
                 quota=quota,
+                cache=SimpleNamespace(lookup=_cache_miss, store=_cache_store_noop),
                 routing_state=routing_state,
                 selector=P2CSelector(settings, routing_state),
             )
@@ -112,6 +126,14 @@ class _FakeRequest:
 
     async def is_disconnected(self) -> bool:
         return False
+
+
+async def _cache_miss(*args: object, **kwargs: object) -> None:
+    del args, kwargs
+
+
+async def _cache_store_noop(*args: object, **kwargs: object) -> None:
+    del args, kwargs
 
 
 class _TtftTimeoutProvider:
@@ -196,6 +218,15 @@ class _FakeQuotaService:
 
 def _fake_request(settings: GatewayConfig, providers: dict[str, object]) -> _FakeRequest:
     return _FakeRequest(settings, providers)
+
+
+def _response() -> UnifiedResponse:
+    return UnifiedResponse(
+        content="ok",
+        finish_reason="stop",
+        model="mock",
+        usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+    )
 
 
 def _settings_for_stream_tests() -> GatewayConfig:

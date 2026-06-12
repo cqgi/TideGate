@@ -73,6 +73,25 @@ policies:
     hedging: { enabled: false }
     cascade: { enabled: false }
 
+cache:
+  l1: { ttl_s: 60, ttl_jitter_ratio: 0.0, max_value_bytes: 262144 }
+  l2:
+    similarity_threshold: 0.86
+    stale_threshold_delta: 0.03
+    max_temperature: 0.3
+    index_capacity: 10000
+    embedding_model: BAAI/bge-small-zh-v1.5
+    embed_pool_workers: 1
+    hf_endpoint: ""
+    model_cache_dir: .cache/huggingface
+    query_timeout_ms: 50
+    store_timeout_ms: 500
+    capacity_sweep_interval_s: 60
+  volatile_intent_patterns: ["今天", "现在", "最新", "几点", "股价", "天气"]
+  reject_patterns: ["无法回答", "作为AI", "抱歉"]
+  replay_chunk_chars: 8
+  replay_interval_ms: 1
+
 quota_plans:
   free:
     rpm: 600

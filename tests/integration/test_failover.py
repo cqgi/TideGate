@@ -192,6 +192,7 @@ def _m3_config(
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = port
     raw["quota_estimator"] = {"output_p95_fallback": 4, "correction_ewma_alpha": 0.1}
+    raw["tenants"][0]["cache"] = {"l1": False, "l2": False}
     raw["model_groups"]["chat-large"]["deployments"] = [
         deployment
         for deployment in raw["model_groups"]["chat-large"]["deployments"]

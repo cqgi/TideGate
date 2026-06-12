@@ -11,6 +11,9 @@ import httpx
 import pytest
 import redis
 
+from tidegate.cache.embedding import embed_sync, init_embedding_worker
+from tidegate.config.loader import load_config
+
 BASE_URL = "http://127.0.0.1:8000"
 MOCK_A_URL = "http://127.0.0.1:9001"
 MOCK_B_URL = "http://127.0.0.1:9002"
@@ -41,6 +44,20 @@ def _env() -> dict[str, str]:
         "MOCK_B_KEY": "mock-key",
         "PYTHONPATH": f"{os.getcwd()}/src:{os.getcwd()}",
     }
+
+
+@pytest.fixture(scope="session")
+def l2_model_ready() -> None:
+    config = load_config("tests/fixtures/gateway-test.yaml")
+    try:
+        init_embedding_worker(
+            config.cache.l2.embedding_model,
+            config.cache.l2.model_cache_dir,
+            config.cache.l2.hf_endpoint,
+        )
+        embed_sync(["模型预热"])
+    except Exception as exc:
+        pytest.skip(f"L2 fastembed model unavailable: {exc}")
 
 
 @pytest.fixture(scope="session")
