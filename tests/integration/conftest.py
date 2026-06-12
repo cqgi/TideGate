@@ -65,6 +65,15 @@ def redis_stack_proc() -> Iterator[None]:
     subprocess.run(["docker", "compose", "-f", "deploy/docker-compose.yml", "down"], check=True)
 
 
+@pytest.fixture(autouse=True)
+def clean_redis(redis_stack_proc: None) -> Iterator[None]:
+    del redis_stack_proc
+    client = redis.Redis.from_url("redis://127.0.0.1:6379/0")
+    client.flushdb()
+    yield
+    redis.Redis.from_url("redis://127.0.0.1:6379/0").flushdb()
+
+
 @pytest.fixture(scope="session")
 def mock_a_proc() -> Iterator[subprocess.Popen[str]]:
     proc = subprocess.Popen(
@@ -95,10 +104,11 @@ def mock_b_proc() -> Iterator[subprocess.Popen[str]]:
 
 @pytest.fixture(scope="session")
 def gateway_proc(
+    redis_stack_proc: None,
     mock_a_proc: subprocess.Popen[str],
     mock_b_proc: subprocess.Popen[str],
 ) -> Iterator[subprocess.Popen[str]]:
-    del mock_a_proc, mock_b_proc
+    del redis_stack_proc, mock_a_proc, mock_b_proc
     proc = subprocess.Popen(
         [sys.executable, "-m", "tidegate", "--config", "tests/fixtures/gateway-test.yaml"],
         stdout=subprocess.PIPE,
