@@ -24,8 +24,15 @@ from tidegate.api.sse import (
 from tidegate.config.models import DeploymentConfig, GatewayConfig, ModelGroupConfig, TenantConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
-from tidegate.core.models import ChatCompletionIn, UnifiedDelta, UnifiedRequest, UnifiedResponse
+from tidegate.core.models import (
+    ChatCompletionIn,
+    UnifiedDelta,
+    UnifiedRequest,
+    UnifiedResponse,
+    Usage,
+)
 from tidegate.providers.base import Provider
+from tidegate.quota.service import QuotaReservation, QuotaService
 from tidegate.routing.selector import pick
 
 router = APIRouter()
@@ -88,6 +95,15 @@ async def chat_completions(request: Request) -> Response:
     # REWORK-M0-1: gateway overhead is request receipt through upstream dispatch.
     request.app.state.metrics.overhead.observe(time.monotonic() - request_started)
     if incoming.stream:
+        stream_exclude: set[tuple[str, str]] = set()
+        deployment, provider = _pick_attempt(request, group, stream_exclude)
+        stream_exclude.add((deployment.provider, deployment.upstream_model))
+        quota_settle = await _reserve_quota(
+            request=request,
+            deployment=deployment,
+            unified=unified,
+            snapshot=settings,
+        )
         return DisconnectAwareStreamingResponse(
             _stream_with_retries(
                 request=request,
@@ -95,6 +111,8 @@ async def chat_completions(request: Request) -> Response:
                 unified=unified,
                 deadline=deadline,
                 incoming=incoming,
+                first_attempt=(deployment, provider, quota_settle),
+                exclude=stream_exclude,
             ),
             media_type="text/event-stream",
             headers={
@@ -137,6 +155,7 @@ async def _render_stream(
     incoming: ChatCompletionIn,
     provider_name: str,
     accounting: StreamAccounting,
+    quota_settle: _QuotaSettlement,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
     request_id: str = request.state.request_id
@@ -166,6 +185,7 @@ async def _render_stream(
             )
             if payload is not None:
                 yield sse_event(payload)
+        quota_settle.capture_usage(accounting.usage)
         yield sse_event("[DONE]")
     except asyncio.CancelledError:
         request.app.state.metrics.upstream_aborted.labels(
@@ -181,25 +201,38 @@ async def _stream_with_retries(
     unified: UnifiedRequest,
     deadline: Deadline,
     incoming: ChatCompletionIn,
+    first_attempt: tuple[DeploymentConfig, Provider, _QuotaSettlement] | None = None,
+    exclude: set[tuple[str, str]] | None = None,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
     tenant: TenantConfig = request.state.tenant
-    exclude: set[tuple[str, str]] = set()
+    attempted = set() if exclude is None else set(exclude)
     attempts = settings.routing.max_attempts_before_first_byte
     last_error: GatewayError | None = None
     route_header = "none"
     accounting = StreamAccounting(started_at=time.monotonic())
     outcome = "error"
     attempt_count = 0
+    quota_settle: _QuotaSettlement | None = None
     try:
         for attempt_index in range(attempts):
             attempt_count = attempt_index + 1
-            try:
-                deployment, provider = _pick_attempt(request, group, exclude)
-            except GatewayError as exc:
-                last_error = exc
-                break
-            exclude.add((deployment.provider, deployment.upstream_model))
+            if attempt_index == 0 and first_attempt is not None:
+                deployment, provider, quota_settle = first_attempt
+            else:
+                try:
+                    deployment, provider = _pick_attempt(request, group, attempted)
+                    quota_settle = await _reserve_quota(
+                        request=request,
+                        deployment=deployment,
+                        unified=unified,
+                        snapshot=settings,
+                        count_request_rejection=False,
+                    )
+                except GatewayError as exc:
+                    last_error = exc
+                    break
+                attempted.add((deployment.provider, deployment.upstream_model))
             route_header = f"{deployment.provider}/{deployment.upstream_model}"
             upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
             sent_data = False
@@ -210,6 +243,7 @@ async def _stream_with_retries(
                     incoming=incoming,
                     provider_name=deployment.provider,
                     accounting=accounting,
+                    quota_settle=quota_settle,
                 ):
                     # DECISION: REWORK-M1-1 treats only SSE data events as the idempotency
                     # boundary; heartbeat comments can be followed by a safe TTFT retry.
@@ -237,6 +271,8 @@ async def _stream_with_retries(
                 aclose = getattr(upstream, "aclose", None)
                 if callable(aclose):
                     await aclose()
+                await quota_settle.settle_once(None, accounting.delta_count)
+                quota_settle = None
                 continue
         if last_error is None:
             last_error = GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
@@ -263,6 +299,8 @@ async def _stream_with_retries(
             accounting=accounting,
             duration_ms=duration * 1000,
         )
+        if quota_settle is not None:
+            await quota_settle.settle_once(accounting.usage, accounting.delta_count)
 
 
 async def _call_non_stream_with_retries(
@@ -280,10 +318,18 @@ async def _call_non_stream_with_retries(
         deployment, provider = _pick_attempt(request, group, exclude)
         exclude.add((deployment.provider, deployment.upstream_model))
         route_header = f"{deployment.provider}/{deployment.upstream_model}"
+        quota_settle = await _reserve_quota(
+            request=request,
+            deployment=deployment,
+            unified=unified,
+            snapshot=settings,
+        )
         try:
             response = await provider.chat(unified, deployment.upstream_model, deadline)
+            await quota_settle.settle_once(response.usage, response.usage.completion_tokens)
             return response, route_header
         except GatewayError as exc:
+            await quota_settle.settle_once(None, 0)
             last_error = exc
             if exc.category not in {
                 ErrorCategory.RETRYABLE_UPSTREAM,
@@ -305,6 +351,84 @@ def _pick_attempt(
     deployment = pick(group, exclude)
     provider = request.app.state.provider_manager.providers[deployment.provider]
     return deployment, provider
+
+
+class _QuotaSettlement:
+    def __init__(
+        self,
+        request: Request,
+        reservation: QuotaReservation,
+        quota: QuotaService,
+    ) -> None:
+        self._request = request
+        self._reservation = reservation
+        self._quota = quota
+        self._settled = False
+        self._usage: Usage | None = None
+
+    def capture_usage(self, usage: Usage | None) -> None:
+        self._usage = usage
+
+    async def settle_once(self, usage: Usage | None, forwarded_tokens: int) -> None:
+        if self._settled:
+            return
+        self._settled = True
+        final_usage = usage or self._usage
+        await self._quota.settle(self._reservation, final_usage, forwarded_tokens)
+        _record_quota_metrics(self._request, self._reservation, final_usage)
+
+
+async def _reserve_quota(
+    *,
+    request: Request,
+    deployment: DeploymentConfig,
+    unified: UnifiedRequest,
+    snapshot: GatewayConfig,
+    count_request_rejection: bool = True,
+) -> _QuotaSettlement:
+    tenant: TenantConfig = request.state.tenant
+    quota: QuotaService = request.app.state.quota
+    try:
+        reservation = await quota.reserve(
+            tenant=tenant,
+            req=unified,
+            deployment=deployment,
+            snapshot=snapshot,
+        )
+    except GatewayError as exc:
+        if exc.category == ErrorCategory.QUOTA_EXCEEDED:
+            dim = (exc.code or "quota_exceeded").removesuffix("_exceeded")
+            request.app.state.metrics.quota_rejections.labels(tenant.id, dim).inc()
+            if count_request_rejection:
+                request.app.state.metrics.requests.labels(
+                    tenant.id,
+                    unified.model,
+                    "rejected",
+                ).inc()
+        raise
+    return _QuotaSettlement(request, reservation, quota)
+
+
+def _record_quota_metrics(
+    request: Request,
+    reservation: QuotaReservation,
+    usage: Usage | None,
+) -> None:
+    if usage is None:
+        return
+    metrics = request.app.state.metrics
+    metrics.tokens.labels(reservation.tenant_id, reservation.model, "in").inc(usage.prompt_tokens)
+    metrics.tokens.labels(reservation.tenant_id, reservation.model, "out").inc(
+        usage.completion_tokens
+    )
+    cost_micro = int(
+        usage.prompt_tokens / 1000 * reservation.deployment.price_per_1k_input_usd * 1_000_000
+        + usage.completion_tokens
+        / 1000
+        * reservation.deployment.price_per_1k_output_usd
+        * 1_000_000
+    )
+    metrics.cost.labels(reservation.tenant_id, reservation.model).inc(cost_micro)
 
 
 def _deadline(settings: GatewayConfig) -> Deadline:

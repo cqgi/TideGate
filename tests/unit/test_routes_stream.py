@@ -16,6 +16,8 @@ from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import ChatCompletionIn, UnifiedDelta, UnifiedRequest, Usage
 from tidegate.obs.metrics import Metrics
+from tidegate.quota.estimator import Estimate
+from tidegate.quota.service import QuotaReservation
 
 
 @pytest.mark.asyncio
@@ -90,11 +92,13 @@ async def test_stream_retry_exhaustion_returns_error_chunk(
 
 class _FakeRequest:
     def __init__(self, settings: GatewayConfig, providers: dict[str, object]) -> None:
+        quota = _FakeQuotaService(settings)
         self.app = SimpleNamespace(
             state=SimpleNamespace(
                 config_holder=SimpleNamespace(current=settings),
                 metrics=Metrics.create(),
                 provider_manager=SimpleNamespace(providers=providers),
+                quota=quota,
             )
         )
         self.state = SimpleNamespace(tenant=settings.tenants[0], request_id="req-test")
@@ -151,6 +155,35 @@ class _SuccessfulStreamProvider(_TtftTimeoutProvider):
         yield UnifiedDelta(content="tok0 ")
         yield UnifiedDelta(finish_reason="stop")
         yield UnifiedDelta(usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2))
+
+
+class _FakeQuotaService:
+    def __init__(self, settings: GatewayConfig) -> None:
+        self._settings = settings
+        self.settled = 0
+
+    async def reserve(self, **kwargs: object) -> QuotaReservation:
+        req = kwargs["req"]
+        deployment = kwargs["deployment"]
+        assert isinstance(req, UnifiedRequest)
+        assert isinstance(deployment, DeploymentConfig)
+        return QuotaReservation(
+            tenant_id=req.tenant_id,
+            request_id=req.request_id,
+            model=req.model,
+            deployment=deployment,
+            estimate=Estimate(prompt_tokens=1, output_tokens=1, tpm_cost=2, budget_cost_micro=1),
+            snapshot=self._settings,
+        )
+
+    async def settle(
+        self,
+        reservation: QuotaReservation,
+        actual: Usage | None,
+        forwarded_tokens: int,
+    ) -> None:
+        del reservation, actual, forwarded_tokens
+        self.settled += 1
 
 
 def _fake_request(settings: GatewayConfig, providers: dict[str, object]) -> _FakeRequest:

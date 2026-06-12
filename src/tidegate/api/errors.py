@@ -14,6 +14,7 @@ _ERROR_TYPE_BY_STATUS = {
     422: "invalid_request_error",
     429: "rate_limit_error",
     502: "upstream_error",
+    503: "internal_error",
     504: "timeout_error",
     500: "internal_error",
 }

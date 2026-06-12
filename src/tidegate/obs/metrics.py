@@ -21,6 +21,10 @@ class Metrics:
     upstream_aborted: Counter
     retry: Counter
     loop_lag: Gauge
+    tokens: Counter
+    cost: Counter
+    quota_rejections: Counter
+    quota_sweep: Counter
 
     @classmethod
     def create(cls) -> Metrics:
@@ -63,6 +67,30 @@ class Metrics:
             loop_lag=Gauge(
                 "tidegate_loop_lag_seconds",
                 "Event loop scheduling lag",
+                registry=registry,
+            ),
+            tokens=Counter(
+                "tidegate_tokens",
+                "Settled token usage",
+                ("tenant", "model", "direction"),
+                registry=registry,
+            ),
+            cost=Counter(
+                "tidegate_cost_microusd",
+                "Settled cost in micro-USD",
+                ("tenant", "model"),
+                registry=registry,
+            ),
+            quota_rejections=Counter(
+                "tidegate_quota_rejections",
+                "Quota rejections",
+                ("tenant", "dim"),
+                registry=registry,
+            ),
+            quota_sweep=Counter(
+                "tidegate_quota_sweep",
+                "Swept quota reservations",
+                ("tenant",),
                 registry=registry,
             ),
         )

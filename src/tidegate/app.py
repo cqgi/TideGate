@@ -22,6 +22,11 @@ from tidegate.obs.logging import configure_logging
 from tidegate.obs.loop_lag import probe_loop_lag
 from tidegate.obs.metrics import Metrics
 from tidegate.providers.manager import ProviderManager
+from tidegate.quota.estimator import QuotaEstimator, RedisCorrectionStore
+from tidegate.quota.local_fallback import LocalFallbackLimiter
+from tidegate.quota.scripts import QuotaScripts
+from tidegate.quota.service import QuotaService
+from tidegate.quota.sweeper import sweep_loop
 
 
 @dataclass
@@ -51,19 +56,28 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task_registry = TaskRegistry()
         redis_client = redis.from_url(settings.redis.url, decode_responses=False)
+        quota_scripts = QuotaScripts(redis_client)
+        quota_service = QuotaService(
+            redis_client,
+            quota_scripts,
+            QuotaEstimator(RedisCorrectionStore(redis_client)),
+            LocalFallbackLimiter(),
+        )
         app.state.config_holder = holder
         app.state.metrics = metrics
         app.state.provider_manager = provider_manager
         app.state.task_registry = task_registry
         app.state.redis = redis_client
+        app.state.quota = quota_service
         task_registry.create(
             probe_loop_lag(metrics, settings.server.loop_lag_interval_s),
             name="tidegate-loop-lag",
         )
         try:
             await redis_client.ping()
+            await quota_scripts.load()
         except redis.RedisError as exc:
-            # DECISION: M1 keeps data-plane serving when Redis hot-reload bus is unavailable.
+            # DECISION: M2 keeps serving so per-tenant fail_mode can decide open/closed fallback.
             structlog.get_logger().warning("redis_unavailable_hot_reload_disabled", error=str(exc))
         else:
             task_registry.create(
@@ -71,6 +85,9 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             )
             task_registry.create(
                 poll_config_version(app, redis_client), name="tidegate-config-poll"
+            )
+            task_registry.create(
+                sweep_loop(holder, quota_service, metrics), name="tidegate-quota-sweeper"
             )
         try:
             yield
