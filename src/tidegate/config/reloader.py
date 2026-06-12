@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import redis.asyncio as redis
 import structlog
@@ -37,6 +38,14 @@ async def publish_reload(redis_client: redis.Redis) -> int:
 
 
 async def watch_config_events(app: FastAPI, redis_client: redis.Redis) -> None:
+    await _supervise_config_loop(
+        app,
+        loop_name="config_events",
+        run_once=lambda: _watch_config_events_once(app, redis_client),
+    )
+
+
+async def _watch_config_events_once(app: FastAPI, redis_client: redis.Redis) -> None:
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(CFG_EVENTS_CHANNEL)
     try:
@@ -55,6 +64,14 @@ async def watch_config_events(app: FastAPI, redis_client: redis.Redis) -> None:
 
 
 async def poll_config_version(app: FastAPI, redis_client: redis.Redis) -> None:
+    await _supervise_config_loop(
+        app,
+        loop_name="config_poll",
+        run_once=lambda: _poll_config_version_loop(app, redis_client),
+    )
+
+
+async def _poll_config_version_loop(app: FastAPI, redis_client: redis.Redis) -> None:
     while True:
         interval_s = app.state.config_holder.current.server.config_poll_interval_s
         await asyncio.sleep(interval_s)
@@ -66,3 +83,29 @@ async def poll_config_version(app: FastAPI, redis_client: redis.Redis) -> None:
             result = await apply_reload(app, version=version)
             if not result.ok:
                 structlog.get_logger().warning("config_reload_failed", error=result.error)
+
+
+async def _supervise_config_loop(
+    app: FastAPI,
+    *,
+    loop_name: str,
+    run_once: Callable[[], Awaitable[None]],
+) -> None:
+    server = app.state.config_holder.current.server
+    backoff_s = server.config_reload_backoff_initial_s
+    while True:
+        try:
+            await run_once()
+            backoff_s = app.state.config_holder.current.server.config_reload_backoff_initial_s
+        except asyncio.CancelledError:
+            raise
+        except (redis.RedisError, ConnectionError) as exc:
+            server = app.state.config_holder.current.server
+            structlog.get_logger().error(
+                "config_reload_loop_failed",
+                loop=loop_name,
+                error=str(exc),
+                retry_in_s=backoff_s,
+            )
+            await asyncio.sleep(backoff_s)
+            backoff_s = min(server.config_reload_backoff_max_s, backoff_s + backoff_s)

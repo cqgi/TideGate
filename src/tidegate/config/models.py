@@ -17,6 +17,12 @@ class ServerConfig(FrozenModel):
     loop_lag_interval_s: float = Field(default=1.0, description="Loop lag probe interval")
     config_poll_interval_s: float = Field(default=30.0, description="Config version poll interval")
     provider_pool_drain_s: float = Field(default=60.0, description="Old provider pool drain delay")
+    config_reload_backoff_initial_s: float = Field(
+        default=1.0, description="Initial Redis hot-reload reconnect backoff"
+    )
+    config_reload_backoff_max_s: float = Field(
+        default=60.0, description="Maximum Redis hot-reload reconnect backoff"
+    )
 
 
 class TimeoutConfig(FrozenModel):

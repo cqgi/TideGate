@@ -7,6 +7,8 @@ server:
   loop_lag_interval_s: 1.0
   config_poll_interval_s: 30.0
   provider_pool_drain_s: 0.1
+  config_reload_backoff_initial_s: 0.1
+  config_reload_backoff_max_s: 1.0
 
 timeouts: { connect_s: 2.0, ttft_s: 10.0, inter_chunk_s: 15.0, total_s: 300.0 }
 

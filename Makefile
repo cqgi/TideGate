@@ -25,7 +25,7 @@ test:
 	$(PYTEST) tests/unit
 
 test-integration:
-	$(PYTEST) -m integration tests/integration/test_m0_e2e.py
+	$(PYTEST) -m integration tests/integration
 
 up:
 	docker compose -f deploy/docker-compose.yml up -d
