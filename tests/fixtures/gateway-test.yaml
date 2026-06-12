@@ -14,6 +14,7 @@ server:
 timeouts: { connect_s: 2.0, ttft_s: 10.0, inter_chunk_s: 15.0, total_s: 300.0 }
 
 redis: { url: "redis://localhost:6379/0" }
+postgres: { dsn_env: TIDEGATE_PG_DSN }
 
 providers:
   mock-a:
@@ -72,6 +73,16 @@ policies:
     degradation: { smaller_model_group: chat-small, stale_cache: true }
     hedging: { enabled: false }
     cascade: { enabled: false }
+  premium-fast:
+    fallback_chain: [chat-large]
+    degradation: { smaller_model_group: chat-small, stale_cache: true }
+    hedging: { enabled: true, trigger_quantile: 0.95, trigger_floor_s: 0.01, max_hedge_ratio: 0.05 }
+    cascade: { enabled: false }
+  cheap-cascade:
+    fallback_chain: [chat-large]
+    degradation: { smaller_model_group: chat-small, stale_cache: true }
+    hedging: { enabled: false }
+    cascade: { enabled: true, draft_model_group: chat-small, confidence_metric: mean_logprob, threshold: -0.45 }
 
 cache:
   l1: { ttl_s: 60, ttl_jitter_ratio: 0.0, max_value_bytes: 262144 }
@@ -116,3 +127,6 @@ tenants:
     plan: free
     policy: default
     cache: { l1: true, l2: false, l2_operating_point: conservative }
+
+settlement: { batch_size: 100, batch_interval_ms: 200, queue_max: 10000 }
+otel: { exporter: none, endpoint: null }

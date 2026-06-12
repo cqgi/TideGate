@@ -29,6 +29,9 @@ class Metrics:
     breaker_state: Gauge
     breaker_transitions: Counter
     cache_events: Counter
+    cascade: Counter
+    hedge: Counter
+    ledger_dropped: Counter
 
     @classmethod
     def create(cls) -> Metrics:
@@ -119,6 +122,23 @@ class Metrics:
                 "tidegate_cache_events",
                 "Cache events",
                 ("level", "event"),
+                registry=registry,
+            ),
+            cascade=Counter(
+                "tidegate_cascade",
+                "Cascade routing events",
+                ("outcome",),
+                registry=registry,
+            ),
+            hedge=Counter(
+                "tidegate_hedge",
+                "Hedged upstream requests",
+                ("outcome",),
+                registry=registry,
+            ),
+            ledger_dropped=Counter(
+                "tidegate_ledger_dropped",
+                "Usage ledger records dropped before enqueue",
                 registry=registry,
             ),
         )

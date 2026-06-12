@@ -3,3 +3,11 @@ services:
     image: redis/redis-stack-server:7.4.0-v8
     ports:
       - "6379:6379"
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tidegate
+      POSTGRES_PASSWORD: tidegate
+      POSTGRES_DB: tidegate
+    ports:
+      - "5432:5432"

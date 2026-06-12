@@ -188,6 +188,11 @@ class SettlementConfig(FrozenModel):
     queue_max: int = 10000
 
 
+class OTelConfig(FrozenModel):
+    exporter: Literal["none", "console", "otlp"] = "none"
+    endpoint: str | None = None
+
+
 class SweeperConfig(FrozenModel):
     interval_s: int = 10
     batch_limit: int = 100
@@ -209,6 +214,7 @@ class GatewayConfig(FrozenModel):
     cache: CacheConfig = Field(default_factory=CacheConfig)
     quota_estimator: QuotaEstimatorConfig = Field(default_factory=QuotaEstimatorConfig)
     settlement: SettlementConfig = Field(default_factory=SettlementConfig)
+    otel: OTelConfig = Field(default_factory=OTelConfig)
     sweeper: SweeperConfig = Field(default_factory=SweeperConfig)
     tenants: tuple[TenantConfig, ...]
 

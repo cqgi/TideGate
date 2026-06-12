@@ -16,6 +16,7 @@ from tidegate.config.holder import ConfigHolder
 from tidegate.config.models import TenantConfig
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.obs.logging import bind_request_id
+from tidegate.obs.otel import start_span
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,8 @@ class RequestContextMiddleware:
                     headers["X-TideGate-Route"] = "none"
             await send(message)
 
-        await self._app(scope, receive, send_with_headers)
+        with start_span("request", {"http.route": str(scope["path"])}):
+            await self._app(scope, receive, send_with_headers)
 
 
 class AuthMiddleware:
@@ -109,7 +111,8 @@ class AuthMiddleware:
             return
         raw_key = authorization.removeprefix(prefix)
         key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
-        tenant = self._cache.get(key_hash) or self._find_tenant(key_hash)
+        with start_span("auth"):
+            tenant = self._cache.get(key_hash) or self._find_tenant(key_hash)
         if tenant is None:
             # SPEC-M0-3: compare sha256(api_key) against tenant config.
             await self._send_error(

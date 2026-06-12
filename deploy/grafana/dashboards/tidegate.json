@@ -1,0 +1,141 @@
+{
+  "title": "TideGate",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Requests by outcome",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(tidegate_requests_total[1m]))" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "TTFT P95/P99",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(tidegate_ttft_seconds_bucket[5m])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(tidegate_ttft_seconds_bucket[5m])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Gateway overhead P99",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(tidegate_gateway_overhead_seconds_bucket[5m])))" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Upstream aborts",
+      "gridPos": { "x": 0, "y": 6, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum by (provider, reason) (rate(tidegate_upstream_aborted_total[1m]))" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Retries",
+      "gridPos": { "x": 8, "y": 6, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum by (reason) (rate(tidegate_retry_total[1m]))" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Loop lag",
+      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "tidegate_loop_lag_seconds" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Tokens",
+      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum by (direction) (rate(tidegate_tokens_total[1m]))" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Cost",
+      "gridPos": { "x": 8, "y": 12, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum(rate(tidegate_cost_microusd_total[1m]))" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Quota rejections",
+      "gridPos": { "x": 16, "y": 12, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum by (dim) (rate(tidegate_quota_rejections_total[1m]))" }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Quota sweep and settle failures",
+      "gridPos": { "x": 0, "y": 18, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum(rate(tidegate_quota_sweep_total[1m]))", "legendFormat": "sweep" },
+        { "expr": "sum(rate(tidegate_quota_settle_failed_total[1m]))", "legendFormat": "settle_failed" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Breaker state and transitions",
+      "gridPos": { "x": 8, "y": 18, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "tidegate_breaker_state", "legendFormat": "state" },
+        { "expr": "sum by (to_state) (rate(tidegate_breaker_transitions_total[1m]))", "legendFormat": "{{to_state}}" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Cache events",
+      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 6 },
+      "targets": [
+        { "expr": "sum by (level, event) (rate(tidegate_cache_events_total[1m]))" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Cascade and hedge",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 6 },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(tidegate_cascade_total[1m]))", "legendFormat": "cascade {{outcome}}" },
+        { "expr": "sum by (outcome) (rate(tidegate_hedge_total[1m]))", "legendFormat": "hedge {{outcome}}" }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Ledger dropped",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 6 },
+      "targets": [
+        { "expr": "rate(tidegate_ledger_dropped_total[1m])" }
+      ]
+    }
+  ]
+}

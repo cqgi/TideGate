@@ -15,6 +15,7 @@ from tidegate.cache.singleflight import Flight, SingleFlight
 from tidegate.config.models import GatewayConfig, TenantConfig
 from tidegate.core.models import UnifiedRequest, UnifiedResponse
 from tidegate.obs.metrics import Metrics
+from tidegate.obs.otel import start_span
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,8 @@ class CacheService:
             return None
         key = exact_key(tenant.id, l1_digest(req))
         try:
-            response = await self._l1.get(key)
+            with start_span("cache.l1", {"stale": stale}):
+                response = await self._l1.get(key)
         except redis.RedisError:
             self._metrics.cache_events.labels("l1", "skip").inc()
             return None
@@ -76,12 +78,14 @@ class CacheService:
             if decision.l2:
                 self._metrics.cache_events.labels("l2", "skip").inc()
             return None
-        hit = await self._lookup_l2(req, tenant, settings, stale=stale)
+        with start_span("cache.l2", {"stale": stale}):
+            hit = await self._lookup_l2(req, tenant, settings, stale=stale)
         if hit is None:
             self._metrics.cache_events.labels("l2", "miss").inc()
             return None
         try:
-            response = await self._l1.get(hit.l1_key)
+            with start_span("cache.l1", {"stale": stale, "semantic_hit": True}):
+                response = await self._l1.get(hit.l1_key)
         except redis.RedisError:
             self._metrics.cache_events.labels("l1", "skip").inc()
             return None

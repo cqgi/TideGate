@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import asyncpg
 import redis.asyncio as redis
 import structlog
 from fastapi import FastAPI
@@ -26,15 +28,18 @@ from tidegate.config.reloader import poll_config_version, watch_config_events
 from tidegate.obs.logging import configure_logging
 from tidegate.obs.loop_lag import probe_loop_lag
 from tidegate.obs.metrics import Metrics
+from tidegate.obs.otel import configure_otel
 from tidegate.providers.manager import ProviderManager
 from tidegate.quota.estimator import QuotaEstimator, RedisCorrectionStore
 from tidegate.quota.local_fallback import LocalFallbackLimiter
 from tidegate.quota.scripts import QuotaScripts
 from tidegate.quota.service import QuotaService
 from tidegate.quota.sweeper import sweep_loop
+from tidegate.routing.hedge import HedgeBudget
 from tidegate.routing.reporter import prewarm_from_aggregate, report_loop
 from tidegate.routing.selector import P2CSelector
 from tidegate.routing.stats import RoutingState
+from tidegate.settlement import LedgerBatcher
 
 
 @dataclass
@@ -56,6 +61,7 @@ class TaskRegistry:
 
 def create_app(settings: GatewayConfig, config_path: str | Path = "config/gateway.yaml") -> FastAPI:
     configure_logging()
+    configure_otel(settings.otel)
     metrics = Metrics.create()
     holder = ConfigHolder(settings, Path(config_path))
     provider_manager = ProviderManager(settings)
@@ -69,6 +75,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         cpu_pool = ProcessPoolExecutor(max_workers=settings.server.cpu_pool_workers)
         embedding_pool: ProcessPoolExecutor | None = None
         embedding_service: EmbeddingService | None = None
+        pg_pool: asyncpg.Pool | None = None
         if any(tenant.cache.l2 for tenant in settings.tenants):
             embedding_pool = ProcessPoolExecutor(
                 max_workers=settings.cache.l2.embed_pool_workers,
@@ -97,6 +104,22 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             LocalFallbackLimiter(),
             metrics,
         )
+        dsn = os.environ.get(settings.postgres.dsn_env)
+        if dsn:
+            try:
+                pg_pool = await asyncpg.create_pool(dsn)
+                ddl = await asyncio.to_thread(_ledger_schema_sql)
+                async with pg_pool.acquire() as conn:
+                    await conn.execute(ddl)
+            except (OSError, asyncpg.PostgresError) as exc:
+                structlog.get_logger().warning(
+                    "postgres_unavailable_ledger_disabled",
+                    error=str(exc),
+                )
+                if pg_pool is not None:
+                    await pg_pool.close()
+                pg_pool = None
+        ledger = LedgerBatcher(pg_pool, settings.settlement, metrics)
         app.state.config_holder = holder
         app.state.metrics = metrics
         app.state.provider_manager = provider_manager
@@ -106,8 +129,10 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         app.state.cpu_pool = cpu_pool
         app.state.embedding_pool = embedding_pool
         app.state.cache = cache_service
+        app.state.ledger = ledger
         app.state.routing_state = routing_state
         app.state.selector = selector
+        app.state.hedge_budget = HedgeBudget()
         task_registry.create(
             probe_loop_lag(metrics, settings.server.loop_lag_interval_s),
             name="tidegate-loop-lag",
@@ -143,12 +168,17 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
                     capacity_sweep_loop(l2_cache, lambda: holder.current),
                     name="tidegate-cache-l2-capacity-sweep",
                 )
+            if pg_pool is not None:
+                task_registry.create(ledger.run(), name="tidegate-ledger-batcher")
         try:
             yield
         finally:
+            await ledger.drain()
             await task_registry.drain()
             await provider_manager.close()
             await redis_client.aclose()
+            if pg_pool is not None:
+                await pg_pool.close()
             cpu_pool.shutdown(cancel_futures=True)
             if embedding_pool is not None:
                 embedding_pool.shutdown(cancel_futures=True)
@@ -163,3 +193,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
     app.include_router(admin_router)
     app.include_router(router)
     return app
+
+
+def _ledger_schema_sql() -> str:
+    return Path("deploy/sql/001_usage_ledger.sql").read_text(encoding="utf-8")
