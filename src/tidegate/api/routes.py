@@ -610,7 +610,11 @@ async def _stream_with_retries(
     outcome = "error"
     attempt_count = 0
     quota_settle: _QuotaSettlement | None = None
+    ledger_written = False
     routing_state = _routing_state(request)
+    active_streams = getattr(request.app.state, "active_streams", None)
+    if active_streams is not None:
+        active_streams.enter()
     try:
         for attempt_index in range(attempts):
             attempt_count = attempt_index + 1
@@ -695,6 +699,19 @@ async def _stream_with_retries(
                         settings,
                         degraded=picked.degraded is not None,
                     )
+                    if quota_settle is not None:
+                        await quota_settle.settle_once(accounting.usage, accounting.delta_count)
+                    await _flush_ledger(
+                        request,
+                        unified=unified,
+                        usage=accounting.usage,
+                        route_header=route_header,
+                        cache_header="miss",
+                        degraded=None if outcome != "degraded" else "stream-degraded",
+                        outcome=outcome,
+                        settings=settings,
+                    )
+                    ledger_written = True
                 elif flight is not None and flight.leader:
                     _cache_service(request).reject(
                         flight,
@@ -792,8 +809,8 @@ async def _stream_with_retries(
         )
         if quota_settle is not None:
             await quota_settle.settle_once(accounting.usage, accounting.delta_count)
-        if accounting.usage is not None:
-            _enqueue_ledger(
+        if accounting.usage is not None and not ledger_written:
+            await _flush_ledger(
                 request,
                 unified=unified,
                 usage=accounting.usage,
@@ -805,6 +822,8 @@ async def _stream_with_retries(
             )
         if flight is not None and flight.leader:
             _cache_service(request).release(flight)
+        if active_streams is not None:
+            active_streams.exit()
 
 
 async def _call_non_stream_with_retries(
@@ -1250,22 +1269,69 @@ def _enqueue_ledger(
 ) -> None:
     if not hasattr(request.app.state, "ledger"):
         return
-    provider, upstream_model = _route_parts(route_header)
-    deployment = _deployment_for_route(settings, provider, upstream_model)
     _ledger(request).enqueue(
-        LedgerRecord(
-            request_id=unified.request_id,
-            tenant_id=unified.tenant_id,
-            model=unified.model,
-            provider=provider,
-            upstream_model=upstream_model,
+        _ledger_record(
+            unified=unified,
             usage=usage,
-            cost_microusd=0 if deployment is None else _usage_cost_microusd(usage, deployment),
-            cache_status=cache_header,
-            route_path=route_header,
+            route_header=route_header,
+            cache_header=cache_header,
             degraded=degraded,
             outcome=outcome,
+            settings=settings,
         )
+    )
+
+
+async def _flush_ledger(
+    request: Request,
+    *,
+    unified: UnifiedRequest,
+    usage: Usage,
+    route_header: str,
+    cache_header: str,
+    degraded: str | None,
+    outcome: str,
+    settings: GatewayConfig,
+) -> None:
+    if not hasattr(request.app.state, "ledger"):
+        return
+    await _ledger(request).enqueue_and_flush(
+        _ledger_record(
+            unified=unified,
+            usage=usage,
+            route_header=route_header,
+            cache_header=cache_header,
+            degraded=degraded,
+            outcome=outcome,
+            settings=settings,
+        )
+    )
+
+
+def _ledger_record(
+    *,
+    unified: UnifiedRequest,
+    usage: Usage,
+    route_header: str,
+    cache_header: str,
+    degraded: str | None,
+    outcome: str,
+    settings: GatewayConfig,
+) -> LedgerRecord:
+    provider, upstream_model = _route_parts(route_header)
+    deployment = _deployment_for_route(settings, provider, upstream_model)
+    return LedgerRecord(
+        request_id=unified.request_id,
+        tenant_id=unified.tenant_id,
+        model=unified.model,
+        provider=provider,
+        upstream_model=upstream_model,
+        usage=usage,
+        cost_microusd=0 if deployment is None else _usage_cost_microusd(usage, deployment),
+        cache_status=cache_header,
+        route_path=route_header,
+        degraded=degraded,
+        outcome=outcome,
     )
 
 

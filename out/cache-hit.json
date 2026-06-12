@@ -1,0 +1,32 @@
+{
+  "cache_headers": {
+    "hit-exact": 161,
+    "miss": 230
+  },
+  "cache_hit_ttft_ms": {
+    "p50": 6.123,
+    "p95": 10.378,
+    "p99": 17.671
+  },
+  "cache_l1_hit_rate": 0.411765,
+  "completed": 391,
+  "e2e_ms": {
+    "p50": 89.947,
+    "p95": 184.93,
+    "p99": 190.676
+  },
+  "errors": 0,
+  "gateway_overhead_p99_ms": 4.95,
+  "gateway_rss_mb": 132.0,
+  "loop_lag_peak_s": 0.0009999999310821295,
+  "mock_directive": {},
+  "peak_inflight": 7,
+  "requests": 391,
+  "scenario": "cache-hit",
+  "success_rate": 1.0,
+  "ttft_ms": {
+    "p50": 87.298,
+    "p95": 94.611,
+    "p99": 100.805
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "cache_headers": {
+    "bypass": 55,
+    "miss": 2948
+  },
+  "cache_hit_ttft_ms": {
+    "p50": null,
+    "p95": null,
+    "p99": null
+  },
+  "cache_l1_hit_rate": null,
+  "completed": 3003,
+  "e2e_ms": {
+    "p50": 46390.788,
+    "p95": 59665.274,
+    "p99": 61923.375
+  },
+  "errors": 87,
+  "gateway_overhead_p99_ms": 4.983,
+  "gateway_rss_mb": 335.188,
+  "loop_lag_peak_s": 0.001999999978579581,
+  "mock_directive": {
+    "output_tokens": 100,
+    "tpot_ms": 300
+  },
+  "peak_inflight": 3082,
+  "requests": 3090,
+  "scenario": "concurrency",
+  "success_rate": 0.9816849816849816,
+  "ttft_ms": {
+    "p50": 94.944,
+    "p95": 19935.517,
+    "p99": 27610.264
+  }
+}

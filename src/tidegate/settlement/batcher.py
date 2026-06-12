@@ -40,6 +40,7 @@ class LedgerBatcher:
         self._metrics = metrics
         self._queue: asyncio.Queue[LedgerRecord] = asyncio.Queue(maxsize=config.queue_max)
         self._closed = False
+        self._drain_lock = asyncio.Lock()
 
     def enqueue(self, record: LedgerRecord) -> None:
         if self._pool is None or self._closed:
@@ -50,9 +51,15 @@ class LedgerBatcher:
             self._metrics.ledger_dropped.inc()
             structlog.get_logger().warning("ledger_queue_full", tenant=record.tenant_id)
 
+    async def enqueue_and_flush(self, record: LedgerRecord) -> None:
+        if self._pool is None or self._closed:
+            return
+        await self._write_with_retry([record])
+
     async def run(self) -> None:
         if self._pool is None:
             return
+        batch: list[LedgerRecord] = []
         try:
             while True:
                 batch = [await self._queue.get()]
@@ -68,27 +75,35 @@ class LedgerBatcher:
                 await self._write_with_retry(batch)
                 for _ in batch:
                     self._queue.task_done()
+                batch = []
         except asyncio.CancelledError:
+            if batch:
+                await self._write_with_retry(batch)
+                for _ in batch:
+                    self._queue.task_done()
             await self.drain()
             raise
 
     async def drain(self) -> None:
-        self._closed = True
-        if self._pool is None:
-            return
-        batch: list[LedgerRecord] = []
-        deadline = asyncio.get_running_loop().time() + self._drain_timeout_s
-        while not self._queue.empty():
-            batch.append(self._queue.get_nowait())
-            if len(batch) >= self._config.batch_size:
+        async with self._drain_lock:
+            if self._pool is None:
+                return
+            batch: list[LedgerRecord] = []
+            deadline = asyncio.get_running_loop().time() + self._drain_timeout_s
+            while not self._queue.empty():
+                batch.append(self._queue.get_nowait())
+                if len(batch) >= self._config.batch_size:
+                    await self._write_with_retry(batch, deadline_s=deadline)
+                    for _ in batch:
+                        self._queue.task_done()
+                    batch = []
+            if batch:
                 await self._write_with_retry(batch, deadline_s=deadline)
                 for _ in batch:
                     self._queue.task_done()
-                batch = []
-        if batch:
-            await self._write_with_retry(batch, deadline_s=deadline)
-            for _ in batch:
-                self._queue.task_done()
+
+    def close(self) -> None:
+        self._closed = True
 
     async def _write_with_retry(
         self,

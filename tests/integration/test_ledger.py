@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import asyncpg
@@ -17,6 +18,7 @@ from tests.integration.conftest import (
     MOCK_A_URL,
     MOCK_B_URL,
     reset_mock,
+    stats,
     wait_ready,
 )
 from tidegate.config.models import SettlementConfig
@@ -80,6 +82,56 @@ def test_ledger_survives_gateway_sigterm(
             _stop_gateway(proc)
 
     assert count == completed
+
+
+@pytest.mark.integration
+def test_sigterm_drains_inflight_streams_and_ledger(
+    mock_a_proc: subprocess.Popen[str],
+    mock_b_proc: subprocess.Popen[str],
+    tmp_path: Path,
+) -> None:
+    """SPEC-F-5."""
+    del mock_a_proc, mock_b_proc
+    reset_mock(MOCK_A_URL)
+    reset_mock(MOCK_B_URL)
+    _set_behavior(MOCK_A_URL, {"ttft_ms": 20, "tpot_ms": 200, "output_tokens": 15})
+    _set_behavior(MOCK_B_URL, {"ttft_ms": 20, "tpot_ms": 200, "output_tokens": 15})
+    port = 8058
+    proc = _start_gateway(_ledger_config(tmp_path, port), port)
+
+    started: list[bool] = [False] * 5
+    results: list[dict[str, object]] = []
+    try:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(
+                    _stream_chat,
+                    port,
+                    f"ledger inflight shutdown {index}",
+                    started,
+                    index,
+                )
+                for index in range(5)
+            ]
+            _wait_for_streams_started(started)
+            drain_started = time.monotonic()
+            proc.terminate()
+            for future in as_completed(futures, timeout=10):
+                results.append(future.result())
+            proc.wait(timeout=15)
+            drain_s = time.monotonic() - drain_started
+        mock_completed = stats(MOCK_A_URL)["completed"] + stats(MOCK_B_URL)["completed"]
+        count = _wait_for_ledger_count(mock_completed, timeout_s=10)
+    finally:
+        if proc.poll() is None:
+            _stop_gateway(proc)
+
+    assert len(results) == 5
+    assert all(result["status_code"] == 200 for result in results)
+    assert all(result["done"] is True for result in results)
+    assert mock_completed == 5
+    assert count == mock_completed
+    assert drain_s < 15.0
 
 
 @pytest.mark.integration
@@ -157,14 +209,65 @@ def _chat(client: httpx.Client, port: int, content: str) -> httpx.Response:
     )
 
 
+def _stream_chat(
+    port: int,
+    content: str,
+    started: list[bool],
+    index: int,
+) -> dict[str, object]:
+    done = False
+    first_data = False
+    with (
+        httpx.Client(timeout=15, trust_env=False) as client,
+        client.stream(
+            "POST",
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "model": "chat-large",
+                "stream": True,
+                "messages": [{"role": "user", "content": content}],
+            },
+        ) as response,
+    ):
+        for line in response.iter_lines():
+            if line.startswith("data:"):
+                first_data = True
+                started[index] = True
+            if line == "data: [DONE]":
+                done = True
+                break
+    return {"status_code": response.status_code, "done": done, "first_data": first_data}
+
+
+def _wait_for_streams_started(started: list[bool]) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if all(started):
+            return
+        time.sleep(0.02)
+    raise RuntimeError(f"streams did not all start: {started}")
+
+
 def _ledger_config(tmp_path: Path, port: int) -> Path:
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = port
-    raw["settlement"] = {"batch_size": 5, "batch_interval_ms": 50, "queue_max": 1000}
+    raw["settlement"] = {
+        "batch_size": 5,
+        "batch_interval_ms": 50,
+        "queue_max": 1000,
+        "drain_timeout_s": 10.0,
+    }
     raw["tenants"][0]["cache"] = {"l1": False, "l2": False}
     path = tmp_path / f"gateway-m5-ledger-{port}.yaml"
     path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
     return path
+
+
+def _set_behavior(url: str, behavior: dict[str, object]) -> None:
+    with httpx.Client(timeout=2, trust_env=False) as client:
+        response = client.post(f"{url}/__behavior", json=behavior)
+    assert response.status_code == 200, response.text
 
 
 def _start_gateway(config_path: Path, port: int) -> subprocess.Popen[str]:

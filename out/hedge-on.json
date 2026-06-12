@@ -10,22 +10,26 @@
   "cache_l1_hit_rate": null,
   "completed": 202,
   "e2e_ms": {
-    "p50": 99.167,
-    "p95": 191.13,
-    "p99": 198.836
+    "p50": 121.91,
+    "p95": 264.787,
+    "p99": 324.806
   },
   "errors": 0,
   "gateway_overhead_p99_ms": 4.95,
-  "gateway_rss_mb": 131.75,
+  "gateway_rss_mb": 134.812,
   "loop_lag_peak_s": 0.0009999999310821295,
-  "mock_directive": {},
+  "mock_directive": {
+    "output_tokens": 8,
+    "tpot_ms": 2,
+    "ttft_lognorm": "4.5,1.0"
+  },
   "peak_inflight": 8,
   "requests": 202,
-  "scenario": "baseline",
+  "scenario": "hedge-on",
   "success_rate": 1.0,
   "ttft_ms": {
-    "p50": 89.805,
-    "p95": 98.583,
-    "p99": 106.551
+    "p50": 96.314,
+    "p95": 239.672,
+    "p99": 295.464
   }
 }

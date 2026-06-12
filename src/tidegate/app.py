@@ -59,6 +59,33 @@ class TaskRegistry:
             await asyncio.gather(*self.tasks, return_exceptions=True)
 
 
+class ActiveStreamTracker:
+    def __init__(self) -> None:
+        self._active = 0
+        self._done = asyncio.Event()
+        self._done.set()
+
+    def enter(self) -> None:
+        self._active += 1
+        self._done.clear()
+
+    def exit(self) -> None:
+        self._active -= 1
+        if self._active <= 0:
+            self._active = 0
+            self._done.set()
+
+    async def drain(self, timeout_s: float) -> None:
+        try:
+            async with asyncio.timeout(timeout_s):
+                await self._done.wait()
+        except TimeoutError:
+            structlog.get_logger().warning(
+                "active_stream_drain_timeout",
+                active=self._active,
+            )
+
+
 def create_app(settings: GatewayConfig, config_path: str | Path = "config/gateway.yaml") -> FastAPI:
     configure_logging()
     configure_otel(settings.otel)
@@ -84,6 +111,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
                     settings.cache.l2.embedding_model,
                     settings.cache.l2.model_cache_dir,
                     settings.cache.l2.hf_endpoint,
+                    settings.cache.l2.reranker_model,
                 ),
             )
             embedding_service = EmbeddingService(embedding_pool)
@@ -124,6 +152,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         app.state.metrics = metrics
         app.state.provider_manager = provider_manager
         app.state.task_registry = task_registry
+        app.state.active_streams = ActiveStreamTracker()
         app.state.redis = redis_client
         app.state.quota = quota_service
         app.state.cpu_pool = cpu_pool
@@ -173,8 +202,10 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         try:
             yield
         finally:
-            await ledger.drain()
+            await app.state.active_streams.drain(settings.settlement.drain_timeout_s)
             await task_registry.drain()
+            await ledger.drain()
+            ledger.close()
             await provider_manager.close()
             await redis_client.aclose()
             if pg_pool is not None:
