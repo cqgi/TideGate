@@ -107,6 +107,7 @@ def create_app(defaults: MockDefaults) -> FastAPI:
             "fail": directive.fail,
             "fail_n": directive.fail_n,
             "retry_after_s": directive.retry_after_s,
+            "logprob_mean": directive.logprob_mean,
         }
         return {"ok": True, "behavior": behavior}
 

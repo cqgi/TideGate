@@ -213,9 +213,29 @@ def _parse_non_stream_response(payload: dict[str, Any]) -> UnifiedResponse:
             finish_reason=str(choice.get("finish_reason") or "stop"),
             usage=usage,
             model=str(payload["model"]),
+            mean_logprob=_mean_logprob(choice),
         )
     except (KeyError, IndexError, TypeError, ValidationError) as exc:
         raise GatewayError("invalid upstream response", ErrorCategory.RETRYABLE_UPSTREAM) from exc
+
+
+def _mean_logprob(choice: dict[str, Any]) -> float | None:
+    logprobs = choice.get("logprobs")
+    if not isinstance(logprobs, dict):
+        return None
+    content = logprobs.get("content")
+    if not isinstance(content, list) or not content:
+        return None
+    values: list[float] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("logprob")
+        if isinstance(value, int | float):
+            values.append(float(value))
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _parse_sse_line(line: str) -> UnifiedDelta | None:

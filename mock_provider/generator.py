@@ -22,6 +22,7 @@ class MockDirective:
     fail: MockFail
     fail_n: int
     retry_after_s: int
+    logprob_mean: float | None
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,13 @@ def directive_from_mapping(
         fail="none",
         fail_n=10,
         retry_after_s=5,
+        logprob_mean=None,
     )
     if raw is None:
         return directive
 
     parsed = json.loads(raw) if isinstance(raw, str) else raw
+    ttft_ms = _directive_ttft_ms(parsed, directive.ttft_ms)
     fail = str(parsed.get("fail", directive.fail))
     if fail not in {
         "none",
@@ -72,13 +75,27 @@ def directive_from_mapping(
     }:
         raise HTTPException(status_code=422, detail="invalid mock fail directive")
     return MockDirective(
-        ttft_ms=_int_field(parsed, "ttft_ms", directive.ttft_ms),
+        ttft_ms=ttft_ms,
         tpot_ms=_int_field(parsed, "tpot_ms", directive.tpot_ms),
         output_tokens=_int_field(parsed, "output_tokens", directive.output_tokens),
         fail=cast(MockFail, fail),
         fail_n=_int_field(parsed, "fail_n", directive.fail_n),
         retry_after_s=_int_field(parsed, "retry_after_s", directive.retry_after_s),
+        logprob_mean=_float_field(parsed, "logprob_mean", directive.logprob_mean),
     )
+
+
+def _directive_ttft_ms(parsed: dict[str, object], default: int) -> int:
+    raw = parsed.get("ttft_lognorm")
+    if raw is None:
+        return _int_field(parsed, "ttft_ms", default)
+    if not isinstance(raw, str):
+        raise HTTPException(status_code=422, detail="invalid mock ttft_lognorm directive")
+    try:
+        mu, sigma = raw.split(",", maxsplit=1)
+        return max(0, math.floor(random.lognormvariate(float(mu), float(sigma))))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid mock ttft_lognorm directive") from exc
 
 
 def _int_field(parsed: dict[str, object], key: str, default: int) -> int:
@@ -88,6 +105,17 @@ def _int_field(parsed: dict[str, object], key: str, default: int) -> int:
     if isinstance(value, int | float | str):
         return int(value)
     raise HTTPException(status_code=422, detail=f"invalid mock integer field: {key}")
+
+
+def _float_field(parsed: dict[str, object], key: str, default: float | None) -> float | None:
+    value = parsed.get(key, default)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise HTTPException(status_code=422, detail=f"invalid mock float field: {key}")
+    if isinstance(value, int | float | str):
+        return float(value)
+    raise HTTPException(status_code=422, detail=f"invalid mock float field: {key}")
 
 
 def prompt_tokens(body: dict[str, object]) -> int:
@@ -112,18 +140,24 @@ def chat_completion_response(
 ) -> dict[str, object]:
     content = completion_text(directive.output_tokens)
     prompt = prompt_tokens(body)
+    choice: dict[str, object] = {
+        "index": 0,
+        "message": {"role": "assistant", "content": content},
+        "finish_reason": "stop",
+    }
+    if body.get("logprobs") is True and directive.logprob_mean is not None:
+        choice["logprobs"] = {
+            "content": [
+                {"token": f"tok{index}", "logprob": directive.logprob_mean}
+                for index in range(directive.output_tokens)
+            ]
+        }
     return {
         "id": f"chatcmpl-mock-{int(time.time() * 1000)}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": str(body.get("model", "mock-model")),
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
-            }
-        ],
+        "choices": [choice],
         "usage": {
             "prompt_tokens": prompt,
             "completion_tokens": directive.output_tokens,

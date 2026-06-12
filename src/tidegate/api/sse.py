@@ -150,6 +150,7 @@ def log_stream_access(
     route: str,
     accounting: StreamAccounting,
     duration_ms: float,
+    trace_id: str | None = None,
 ) -> None:
     structlog.get_logger().info(
         "access",
@@ -162,4 +163,5 @@ def log_stream_access(
         forwarded_chars=accounting.content_chars,
         forwarded_deltas=accounting.delta_count,
         usage=None if accounting.usage is None else accounting.usage.model_dump(),
+        trace_id=trace_id,
     )
