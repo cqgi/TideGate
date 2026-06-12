@@ -1,0 +1,35 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+  sse_heartbeat_interval_s: 0.5
+  auth_cache_size: 1024
+  auth_cache_ttl_s: 60
+  loop_lag_interval_s: 1.0
+
+timeouts: { connect_s: 2.0, ttft_s: 10.0, inter_chunk_s: 15.0, total_s: 300.0 }
+
+redis: { url: "redis://localhost:6379/0" }
+
+providers:
+  mock-a:
+    type: openai_compatible
+    base_url: http://127.0.0.1:9001/v1
+    api_key_env: MOCK_A_KEY
+    max_connections: 200
+
+model_groups:
+  chat-large:
+    deployments:
+      - provider: mock-a
+        upstream_model: mock-gpt-large
+        weight: 1
+        price_per_1k_input_usd: 0.0030
+        price_per_1k_output_usd: 0.0060
+        supports_logprobs: true
+
+tenants:
+  - id: demo
+    api_key_sha256: a69b1744aae71fddcefab5a490e09c9b51bcbe22fe74ffb5b91459c4cbb4e97b
+    plan: free
+    policy: default
+    cache: { l1: true, l2: false }

@@ -1,0 +1,5 @@
+services:
+  redis-stack:
+    image: redis/redis-stack-server:7.4.0-v8
+    ports:
+      - "6379:6379"
