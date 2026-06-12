@@ -1,0 +1,1 @@
+{"completed": 11493, "e2e_ms": {"p50": 168.211, "p95": 175.513, "p99": 179.379}, "gateway_overhead_p99_ms": null, "loop_lag_peak_s": null, "peak_inflight": 53, "requests": 11493, "success_rate": 1.0, "ttft_ms": {"p50": 81.895, "p95": 83.841, "p99": 86.545}}
