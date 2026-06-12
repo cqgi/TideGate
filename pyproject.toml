@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "tidegate"
 version = "0.1.0"
 description = "OpenAI-compatible LLM traffic gateway"
-readme = "docs/architecture.md"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.124.0",
