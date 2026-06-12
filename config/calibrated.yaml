@@ -1,0 +1,15 @@
+cache:
+  l2:
+    similarity_threshold: 0.885
+calibration:
+  model: BAAI/bge-small-zh-v1.5
+  pairs: data/calibration/semcache_pairs.jsonl
+  pair_count: 284
+  positives: 182
+  negatives: 102
+  dataset_sha256: c92e3acde43aa45abf0185de52d920a60f6c88672105d09ba37897bcf06cdbf7
+  generated_at: '2026-06-12T13:07:17.885531+00:00'
+  max_false_hit: 0.01
+  tau: 0.885
+  hit_rate: 0.10989
+  false_hit_rate: 0.009804

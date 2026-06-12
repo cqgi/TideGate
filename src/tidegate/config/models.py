@@ -141,16 +141,26 @@ class L1CacheConfig(FrozenModel):
 
 class L2CacheConfig(FrozenModel):
     similarity_threshold: float = 0.92
+    stale_threshold_delta: float = 0.03
     max_temperature: float = 0.3
     index_capacity: int = 100000
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embed_pool_workers: int = 2
+    hf_endpoint: str = Field(default="", description="Optional HuggingFace endpoint mirror")
+    model_cache_dir: str = Field(default=".cache/huggingface", description="Model cache directory")
+    query_timeout_ms: int = Field(default=50, description="L2 lookup timeout budget")
+    store_timeout_ms: int = Field(default=500, description="L2 semantic store timeout budget")
+    capacity_sweep_interval_s: float = Field(
+        default=60.0,
+        description="L2 capacity cleanup interval",
+    )
 
 
 class CacheConfig(FrozenModel):
     l1: L1CacheConfig = Field(default_factory=L1CacheConfig)
     l2: L2CacheConfig = Field(default_factory=L2CacheConfig)
     volatile_intent_patterns: tuple[str, ...] = ("今天", "现在", "最新", "几点", "股价", "天气")
+    reject_patterns: tuple[str, ...] = ("无法回答", "作为AI", "抱歉")
     replay_chunk_chars: int = 24
     replay_interval_ms: int = 15
 

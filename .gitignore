@@ -8,3 +8,4 @@ __pycache__/
 *.py[cod]
 docs/
 out/
+.cache/
