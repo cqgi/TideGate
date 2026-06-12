@@ -2,16 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 from tidegate.config.models import GatewayConfig
 from tidegate.providers.base import Provider
 from tidegate.providers.registry import build_provider, build_providers
-
-
-@dataclass(frozen=True)
-class ProviderSnapshot:
-    providers: Mapping[str, Provider]
 
 
 class ProviderManager:

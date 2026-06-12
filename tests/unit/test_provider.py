@@ -9,9 +9,10 @@ import pytest
 from tidegate.config.models import ProviderConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
-from tidegate.core.models import ChatMessage, UnifiedRequest
+from tidegate.core.models import ChatMessage, UnifiedRequest, Usage
 from tidegate.providers.openai_compat import (
     OpenAICompatibleProvider,
+    _non_stream_timeout,
     _parse_retry_after,
     _parse_sse_line,
 )
@@ -33,6 +34,24 @@ def test_retry_after_http_date_and_invalid() -> None:
 def test_connect_timeout_is_retryable() -> None:
     """REWORK-M0-3."""
     assert issubclass(httpx.ConnectTimeout, httpx.TimeoutException)
+
+
+def test_non_stream_timeout_uses_total_deadline_for_reads() -> None:
+    """REWORK-M1-3."""
+    deadline = Deadline(connect_s=0.1, ttft_s=0.1, inter_chunk_s=0.1, total_deadline=999999999.0)
+    timeout = _non_stream_timeout(deadline)
+    assert timeout.read is None
+
+
+def test_parse_sse_line_preserves_finish_reason_with_usage() -> None:
+    """REWORK-M1-6."""
+    delta = _parse_sse_line(
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}'
+    )
+    assert delta is not None
+    assert delta.finish_reason == "stop"
+    assert delta.usage == Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3)
 
 
 @pytest.mark.asyncio

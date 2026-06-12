@@ -46,7 +46,7 @@ class OpenAICompatibleProvider:
                     f"{self._config.base_url}/chat/completions",
                     json=body,
                     headers=headers,
-                    timeout=_timeout(deadline),
+                    timeout=_non_stream_timeout(deadline),
                 )
         except httpx.ConnectTimeout as exc:
             # REWORK-M0-3: connect timeout is a retryable connection failure.
@@ -60,7 +60,9 @@ class OpenAICompatibleProvider:
         except httpx.RemoteProtocolError as exc:
             raise GatewayError("upstream protocol error", ErrorCategory.RETRYABLE_UPSTREAM) from exc
         except httpx.TimeoutException as exc:
-            raise GatewayError("upstream timed out", ErrorCategory.TIMEOUT_STALL) from exc
+            raise GatewayError(
+                "upstream total deadline exceeded", ErrorCategory.TIMEOUT_TOTAL
+            ) from exc
         except TimeoutError as exc:
             raise GatewayError(
                 "upstream total deadline exceeded", ErrorCategory.TIMEOUT_TOTAL
@@ -85,7 +87,7 @@ class OpenAICompatibleProvider:
                     f"{self._config.base_url}/chat/completions",
                     json=body,
                     headers=headers,
-                    timeout=_timeout(deadline),
+                    timeout=_stream_timeout(deadline),
                 ) as response:
                     _raise_for_status(response)
                     first_content = False
@@ -149,10 +151,21 @@ class OpenAICompatibleProvider:
         return body, headers
 
 
-def _timeout(deadline: Deadline) -> httpx.Timeout:
+def _stream_timeout(deadline: Deadline) -> httpx.Timeout:
     return httpx.Timeout(
         connect=deadline.connect_s,
         read=deadline.inter_chunk_s,
+        write=deadline.connect_s,
+        pool=deadline.connect_s,
+    )
+
+
+def _non_stream_timeout(deadline: Deadline) -> httpx.Timeout:
+    # DECISION: REWORK-M1-3 leaves non-stream response reads governed by the total
+    # deadline, because a valid long answer arrives as one completed response body.
+    return httpx.Timeout(
+        connect=deadline.connect_s,
+        read=None,
         write=deadline.connect_s,
         pool=deadline.connect_s,
     )
@@ -218,20 +231,22 @@ def _parse_sse_line(line: str) -> UnifiedDelta | None:
     except json.JSONDecodeError as exc:
         # REWORK-M0-3: bad upstream SSE JSON is an upstream protocol error.
         raise GatewayError("invalid upstream SSE", ErrorCategory.RETRYABLE_UPSTREAM) from exc
-    if "usage" in payload and payload["usage"] is not None:
-        return UnifiedDelta(usage=Usage.model_validate(payload["usage"]), raw=payload)
-
     choices = payload.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return None
-    choice = choices[0]
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    if "usage" in payload and payload["usage"] is not None:
+        return UnifiedDelta(
+            finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+            usage=Usage.model_validate(payload["usage"]),
+            raw=payload,
+        )
+
     if not isinstance(choice, dict):
         return None
     delta = choice.get("delta")
     if not isinstance(delta, dict):
         delta = {}
     content = delta.get("content")
-    finish_reason = choice.get("finish_reason")
     return UnifiedDelta(
         content=content if isinstance(content, str) else None,
         finish_reason=finish_reason if isinstance(finish_reason, str) else None,
