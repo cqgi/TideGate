@@ -22,6 +22,12 @@ from tidegate.api.sse import (
     stream_chunk_payload,
     with_heartbeats,
 )
+from tidegate.cache.gates import read_decision
+from tidegate.cache.keys import exact_key
+from tidegate.cache.normalize import l1_digest
+from tidegate.cache.replay import replay_as_stream
+from tidegate.cache.service import CacheService
+from tidegate.cache.singleflight import Flight
 from tidegate.config.models import DeploymentConfig, GatewayConfig, TenantConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
@@ -59,6 +65,20 @@ class _PickResult:
     level_index: int
 
 
+@dataclass(frozen=True)
+class _ChatResult:
+    response: UnifiedResponse
+    route_header: str
+    cache_header: str
+    degraded: str | None = None
+
+
+@dataclass
+class _StreamAttemptState:
+    cacheable_content: list[str]
+    finish_reason: str | None = None
+
+
 @router.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -78,6 +98,17 @@ async def list_models(request: Request) -> JSONResponse:
         for name in sorted(settings.model_groups)
     ]
     return JSONResponse({"object": "list", "data": models})
+
+
+@router.post("/v1/cache/feedback")
+async def cache_feedback(request: Request) -> JSONResponse:
+    payload = await request.json()
+    request_id = payload.get("request_id")
+    verdict = payload.get("verdict")
+    if not isinstance(request_id, str) or verdict != "wrong_answer":
+        raise GatewayError("request validation failed", ErrorCategory.CLIENT_ERROR, http_status=422)
+    evicted = await _cache_service(request).evict_feedback(request_id)
+    return JSONResponse({"ok": True, "evicted": evicted})
 
 
 @router.post("/v1/chat/completions", response_model=None)
@@ -122,6 +153,65 @@ async def chat_completions(request: Request) -> Response:
             unified=unified,
             snapshot=settings,
         )
+        cache_header = "bypass" if _cache_bypassed(unified, tenant, settings) else "miss"
+        cache_hit = None
+        flight: Flight[UnifiedResponse] | None = None
+        if cache_header != "bypass":
+            cache_hit = await _cache_service(request).lookup(unified, tenant, settings)
+        if cache_hit is not None:
+            await quota_settle.refund_full()
+            _cache_service(request).remember_request_entry(
+                unified.request_id,
+                cache_hit.semcache_entry_id,
+            )
+            return DisconnectAwareStreamingResponse(
+                _stream_cached_response(request, incoming, cache_hit.response),
+                media_type="text/event-stream",
+                headers={
+                    "X-TideGate-Cache": cache_hit.cache_header,
+                    "X-TideGate-Route": "cache",
+                },
+            )
+        if cache_header != "bypass":
+            flight_key = exact_key(tenant.id, l1_digest(unified))
+            flight = _cache_service(request).acquire(flight_key)
+            if not flight.leader:
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.shield(flight.future),
+                        timeout=deadline.remaining(),
+                    )
+                    await quota_settle.refund_full()
+                    return DisconnectAwareStreamingResponse(
+                        _stream_cached_response(request, incoming, response),
+                        media_type="text/event-stream",
+                        headers={
+                            "X-TideGate-Cache": "hit-exact",
+                            "X-TideGate-Route": "cache",
+                        },
+                    )
+                except Exception:
+                    # SPEC-M4-3: stream followers also fall back to an independent upstream
+                    # stream when the leader fails instead of inheriting the leader error.
+                    pass
+            else:
+                cache_hit = await _cache_service(request).lookup(unified, tenant, settings)
+                if cache_hit is not None:
+                    await quota_settle.refund_full()
+                    _cache_service(request).remember_request_entry(
+                        unified.request_id,
+                        cache_hit.semcache_entry_id,
+                    )
+                    _cache_service(request).resolve(flight, cache_hit.response)
+                    _cache_service(request).release(flight)
+                    return DisconnectAwareStreamingResponse(
+                        _stream_cached_response(request, incoming, cache_hit.response),
+                        media_type="text/event-stream",
+                        headers={
+                            "X-TideGate-Cache": cache_hit.cache_header,
+                            "X-TideGate-Route": "cache",
+                        },
+                    )
         return DisconnectAwareStreamingResponse(
             _stream_with_retries(
                 request=request,
@@ -132,17 +222,18 @@ async def chat_completions(request: Request) -> Response:
                 first_attempt=(picked.attempt, quota_settle),
                 exclude=stream_exclude,
                 level_index=picked.level_index,
+                flight=flight,
             ),
             media_type="text/event-stream",
             headers={
-                "X-TideGate-Cache": "miss",
+                "X-TideGate-Cache": cache_header,
                 "X-TideGate-Route": _route_header(picked.attempt.deployment),
                 **_degraded_header(picked.attempt.degraded),
             },
         )
 
     started = time.monotonic()
-    response, route_header, degraded = await _call_non_stream_with_retries(
+    result = await _call_non_stream_with_retries(
         request=request,
         levels=levels,
         unified=unified,
@@ -150,14 +241,15 @@ async def chat_completions(request: Request) -> Response:
         model=incoming.model,
     )
     duration = time.monotonic() - started
-    outcome = "degraded" if degraded is not None else "ok"
+    response = result.response
+    outcome = _outcome_for(result)
     request.app.state.metrics.requests.labels(tenant.id, incoming.model, outcome).inc()
     structlog.get_logger().info(
         "access",
         tenant=tenant.id,
         model=incoming.model,
         outcome=outcome,
-        route=route_header,
+        route=result.route_header,
         ttft_ms=None,
         duration_ms=duration * 1000,
         forwarded_chars=len(response.content),
@@ -167,9 +259,9 @@ async def chat_completions(request: Request) -> Response:
     return JSONResponse(
         _non_stream_payload(request_id, incoming.model, response),
         headers={
-            "X-TideGate-Cache": "miss",
-            "X-TideGate-Route": route_header,
-            **_degraded_header(degraded),
+            "X-TideGate-Cache": result.cache_header,
+            "X-TideGate-Route": result.route_header,
+            **_degraded_header(result.degraded),
         },
     )
 
@@ -183,6 +275,7 @@ async def _render_stream(
     accounting: StreamAccounting,
     quota_settle: _QuotaSettlement,
     attempt_started_at: float,
+    stream_state: _StreamAttemptState,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
     request_id: str = request.state.request_id
@@ -197,6 +290,10 @@ async def _render_stream(
             if delta is None:
                 yield heartbeat_event()
                 continue
+            if delta.content:
+                stream_state.cacheable_content.append(delta.content)
+            if delta.finish_reason is not None:
+                stream_state.finish_reason = delta.finish_reason
             now = time.monotonic()
             if accounting.ttft_ms is None and delta.content:
                 accounting.ttft_ms = (now - attempt_started_at) * 1000
@@ -213,12 +310,30 @@ async def _render_stream(
             if payload is not None:
                 yield sse_event(payload)
         quota_settle.capture_usage(accounting.usage)
-        yield sse_event("[DONE]")
     except asyncio.CancelledError:
         request.app.state.metrics.upstream_aborted.labels(
             provider=provider_name, reason="client_disconnect"
         ).inc()
         raise
+
+
+async def _stream_cached_response(
+    request: Request,
+    incoming: ChatCompletionIn,
+    response: UnifiedResponse,
+) -> AsyncIterator[bytes]:
+    settings: GatewayConfig = request.app.state.config_holder.current
+    request_id: str = request.state.request_id
+    async for delta in replay_as_stream(response, settings):
+        payload = stream_chunk_payload(
+            request_id,
+            incoming.model,
+            delta,
+            include_usage=incoming.include_stream_usage(),
+        )
+        if payload is not None:
+            yield sse_event(payload)
+    yield sse_event("[DONE]")
 
 
 async def _stream_with_retries(
@@ -231,6 +346,7 @@ async def _stream_with_retries(
     first_attempt: tuple[_PickedAttempt, _QuotaSettlement] | None = None,
     exclude: set[tuple[str, str]] | None = None,
     level_index: int = 0,
+    flight: Flight[UnifiedResponse] | None = None,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
     tenant: TenantConfig = request.state.tenant
@@ -273,6 +389,7 @@ async def _stream_with_retries(
                 break
             route_header = _route_header(deployment)
             attempt_started_at = time.monotonic()
+            stream_state = _StreamAttemptState(cacheable_content=[])
             try:
                 routing_state.record_start(deployment, now_s=time.monotonic())
             except GatewayError as exc:
@@ -289,6 +406,7 @@ async def _stream_with_retries(
                     accounting=accounting,
                     quota_settle=quota_settle,
                     attempt_started_at=attempt_started_at,
+                    stream_state=stream_state,
                 ):
                     # DECISION: REWORK-M1-1 treats only SSE data events as the idempotency
                     # boundary; heartbeat comments can be followed by a safe TTFT retry.
@@ -304,10 +422,37 @@ async def _stream_with_retries(
                 outcome = "ok"
                 if picked.degraded is not None:
                     outcome = "degraded"
+                if accounting.usage is not None:
+                    response = UnifiedResponse(
+                        content="".join(stream_state.cacheable_content),
+                        finish_reason=stream_state.finish_reason or "stop",
+                        usage=accounting.usage,
+                        model=deployment.upstream_model,
+                    )
+                    if flight is not None and flight.leader:
+                        _cache_service(request).resolve(flight, response)
+                    await _cache_service(request).store(
+                        unified,
+                        tenant,
+                        response,
+                        settings,
+                        degraded=picked.degraded is not None,
+                    )
+                elif flight is not None and flight.leader:
+                    _cache_service(request).reject(
+                        flight,
+                        GatewayError(
+                            "stream response missing usage",
+                            ErrorCategory.RETRYABLE_UPSTREAM,
+                        ),
+                    )
+                yield sse_event("[DONE]")
                 return
             except _ClientDisconnectedError:
                 outcome = "client_disconnect"
                 routing_state.record_abort(deployment)
+                if flight is not None and flight.leader:
+                    _cache_service(request).reject(flight, _ClientDisconnectedError())
                 return
             except GatewayError as exc:
                 last_error = exc
@@ -335,6 +480,30 @@ async def _stream_with_retries(
                 continue
         if last_error is None:
             last_error = GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
+        stale_hit = await RoutingLadder(settings).stale_cache(
+            _cache_service(request),
+            unified,
+            tenant,
+        )
+        if stale_hit is not None:
+            if quota_settle is not None:
+                await quota_settle.refund_full()
+            _cache_service(request).remember_request_entry(
+                unified.request_id,
+                stale_hit.semcache_entry_id,
+            )
+            # SPEC-M4-7: streaming headers were already sent at admission time, so
+            # stale-cache degradation is only visible through the replayed SSE body.
+            outcome = "degraded"
+            route_header = "cache"
+            if flight is not None and flight.leader:
+                _cache_service(request).reject(
+                    flight,
+                    GatewayError("leader served stale cache", ErrorCategory.RETRYABLE_UPSTREAM),
+                )
+            async for chunk in _stream_cached_response(request, incoming, stale_hit.response):
+                yield chunk
+            return
         # REWORK-M1-2: once StreamingResponse has been selected, every failure is in-band.
         structlog.get_logger().error(
             "stream_request_failed",
@@ -342,10 +511,18 @@ async def _stream_with_retries(
             attempts=attempt_count,
             route=route_header,
         )
+        if flight is not None and flight.leader:
+            _cache_service(request).reject(flight, last_error)
         async for chunk in error_chunk(unified.request_id, incoming.model):
             yield chunk
     except asyncio.CancelledError:
         outcome = "client_disconnect"
+        if flight is not None and flight.leader:
+            _cache_service(request).reject(flight, _ClientDisconnectedError())
+        raise
+    except BaseException as exc:
+        if flight is not None and flight.leader:
+            _cache_service(request).reject(flight, exc)
         raise
     finally:
         duration = time.monotonic() - accounting.started_at
@@ -360,6 +537,8 @@ async def _stream_with_retries(
         )
         if quota_settle is not None:
             await quota_settle.settle_once(accounting.usage, accounting.delta_count)
+        if flight is not None and flight.leader:
+            _cache_service(request).release(flight)
 
 
 async def _call_non_stream_with_retries(
@@ -369,69 +548,191 @@ async def _call_non_stream_with_retries(
     unified: UnifiedRequest,
     deadline: Deadline,
     model: str,
-) -> tuple[UnifiedResponse, str, str | None]:
+) -> _ChatResult:
     settings: GatewayConfig = request.app.state.config_holder.current
+    tenant: TenantConfig = request.state.tenant
+    cache = _cache_service(request)
+    initial_deployment = levels[0].group.deployments[0]
+    bypass_cache = _cache_bypassed(unified, tenant, settings)
+    cache_quota = await _reserve_quota(
+        request=request,
+        deployment=initial_deployment,
+        unified=unified,
+        snapshot=settings,
+    )
+    cache_hit = None if bypass_cache else await cache.lookup(unified, tenant, settings)
+    if cache_hit is not None:
+        await cache_quota.refund_full()
+        cache.remember_request_entry(unified.request_id, cache_hit.semcache_entry_id)
+        return _ChatResult(cache_hit.response, "cache", cache_hit.cache_header)
+    if bypass_cache:
+        return await _call_non_stream_upstream(
+            request=request,
+            levels=levels,
+            unified=unified,
+            deadline=deadline,
+            model=model,
+            cache=cache,
+            cache_quota=cache_quota,
+            flight=None,
+            cache_header="bypass",
+        )
+
+    flight_key = exact_key(tenant.id, l1_digest(unified))
+    flight = cache.acquire(flight_key)
+    if not flight.leader:
+        try:
+            response = await asyncio.wait_for(
+                asyncio.shield(flight.future),
+                timeout=deadline.remaining(),
+            )
+            await cache_quota.refund_full()
+            return _ChatResult(response, "cache", "hit-exact")
+        except Exception:
+            # SPEC-M4-3: follower fallback is an independent upstream attempt when leader fails.
+            pass
+    else:
+        # SPEC-M4-3: a request can miss L1 before the previous leader stores, then acquire
+        # a fresh leader slot after that leader releases. Re-check before calling upstream
+        # so the same concurrent miss still collapses to one provider request.
+        cache_hit = await cache.lookup(unified, tenant, settings)
+        if cache_hit is not None:
+            await cache_quota.refund_full()
+            cache.remember_request_entry(unified.request_id, cache_hit.semcache_entry_id)
+            cache.resolve(flight, cache_hit.response)
+            cache.release(flight)
+            return _ChatResult(cache_hit.response, "cache", cache_hit.cache_header)
+
+    return await _call_non_stream_upstream(
+        request=request,
+        levels=levels,
+        unified=unified,
+        deadline=deadline,
+        model=model,
+        cache=cache,
+        cache_quota=cache_quota,
+        flight=flight,
+        cache_header="miss",
+    )
+
+
+async def _call_non_stream_upstream(
+    *,
+    request: Request,
+    levels: list[RouteLevel],
+    unified: UnifiedRequest,
+    deadline: Deadline,
+    model: str,
+    cache: CacheService,
+    cache_quota: _QuotaSettlement,
+    flight: Flight[UnifiedResponse] | None,
+    cache_header: str,
+) -> _ChatResult:
+    settings: GatewayConfig = request.app.state.config_holder.current
+    tenant: TenantConfig = request.state.tenant
+    result: _ChatResult | None = None
+    quota_settle: _QuotaSettlement | None = cache_quota
     exclude: set[tuple[str, str]] = set()
     last_error: GatewayError | None = None
     level_index = 0
     routing_state = _routing_state(request)
-    for _ in range(settings.routing.max_attempts_before_first_byte):
-        try:
-            result = _pick_next_attempt(request, levels, exclude, level_index)
-        except GatewayError as exc:
-            last_error = exc
-            break
-        picked = result.attempt
-        level_index = result.level_index
-        deployment = picked.deployment
-        provider = picked.provider
-        exclude.add((deployment.provider, deployment.upstream_model))
-        route_header = _route_header(deployment)
-        quota_settle = await _reserve_quota(
-            request=request,
-            deployment=deployment,
-            unified=unified,
-            snapshot=settings,
-        )
-        attempt_started_at = time.monotonic()
-        try:
-            routing_state.record_start(deployment, now_s=time.monotonic())
-        except GatewayError as exc:
+    try:
+        for _ in range(settings.routing.max_attempts_before_first_byte):
+            try:
+                pick_result = _pick_next_attempt(request, levels, exclude, level_index)
+            except GatewayError as exc:
+                last_error = exc
+                break
+            picked = pick_result.attempt
+            level_index = pick_result.level_index
+            deployment = picked.deployment
+            provider = picked.provider
+            exclude.add((deployment.provider, deployment.upstream_model))
+            route_header = _route_header(deployment)
+            if quota_settle is None:
+                quota_settle = await _reserve_quota(
+                    request=request,
+                    deployment=deployment,
+                    unified=unified,
+                    snapshot=settings,
+                )
+            quota_settle.use_deployment(deployment)
+            attempt_started_at = time.monotonic()
+            try:
+                routing_state.record_start(deployment, now_s=time.monotonic())
+            except GatewayError as exc:
+                last_error = exc
+                continue
+            try:
+                response = await provider.chat(unified, deployment.upstream_model, deadline)
+                await quota_settle.settle_once(response.usage, response.usage.completion_tokens)
+                routing_state.record_finish(
+                    deployment,
+                    success=True,
+                    ttft_s=time.monotonic() - attempt_started_at,
+                    now_s=time.monotonic(),
+                )
+                result = _ChatResult(response, route_header, cache_header, picked.degraded)
+                await cache.store(
+                    unified,
+                    tenant,
+                    response,
+                    settings,
+                    degraded=picked.degraded is not None,
+                )
+                if flight is not None and flight.leader:
+                    cache.resolve(flight, response)
+                quota_settle = None
+                return result
+            except GatewayError as exc:
+                if quota_settle is None:
+                    raise GatewayError("quota settlement missing", ErrorCategory.INTERNAL) from exc
+                await quota_settle.settle_once(None, 0)
+                quota_settle = None
+                last_error = exc
+                _record_route_error(
+                    request,
+                    deployment,
+                    exc,
+                    ttft_s=time.monotonic() - attempt_started_at,
+                    now_s=time.monotonic(),
+                )
+                if exc.category not in {
+                    ErrorCategory.RETRYABLE_UPSTREAM,
+                    ErrorCategory.RATE_LIMITED_UPSTREAM,
+                    ErrorCategory.TIMEOUT_TTFT,
+                }:
+                    request.app.state.metrics.requests.labels(
+                        unified.tenant_id, model, "error"
+                    ).inc()
+                    raise
+                request.app.state.metrics.retry.labels(reason=exc.category.value).inc()
+        stale_hit = await RoutingLadder(settings).stale_cache(cache, unified, tenant)
+        if stale_hit is not None:
+            if quota_settle is not None:
+                await quota_settle.refund_full()
+                quota_settle = None
+            cache.remember_request_entry(unified.request_id, stale_hit.semcache_entry_id)
+            if flight is not None and flight.leader:
+                cache.reject(
+                    flight,
+                    GatewayError("leader served stale cache", ErrorCategory.RETRYABLE_UPSTREAM),
+                )
+            return _ChatResult(stale_hit.response, "cache", stale_hit.cache_header, "stale-cache")
+        if quota_settle is not None:
             await quota_settle.settle_once(None, 0)
-            last_error = exc
-            continue
-        try:
-            response = await provider.chat(unified, deployment.upstream_model, deadline)
-            await quota_settle.settle_once(response.usage, response.usage.completion_tokens)
-            routing_state.record_finish(
-                deployment,
-                success=True,
-                ttft_s=time.monotonic() - attempt_started_at,
-                now_s=time.monotonic(),
-            )
-            return response, route_header, picked.degraded
-        except GatewayError as exc:
-            await quota_settle.settle_once(None, 0)
-            last_error = exc
-            _record_route_error(
-                request,
-                deployment,
-                exc,
-                ttft_s=time.monotonic() - attempt_started_at,
-                now_s=time.monotonic(),
-            )
-            if exc.category not in {
-                ErrorCategory.RETRYABLE_UPSTREAM,
-                ErrorCategory.RATE_LIMITED_UPSTREAM,
-                ErrorCategory.TIMEOUT_TTFT,
-            }:
-                request.app.state.metrics.requests.labels(unified.tenant_id, model, "error").inc()
-                raise
-            request.app.state.metrics.retry.labels(reason=exc.category.value).inc()
-    request.app.state.metrics.requests.labels(unified.tenant_id, model, "error").inc()
-    if last_error is not None:
-        raise last_error
-    raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
+            quota_settle = None
+        request.app.state.metrics.requests.labels(unified.tenant_id, model, "error").inc()
+        if last_error is not None:
+            raise last_error
+        raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
+    except BaseException as exc:
+        if flight is not None and flight.leader and result is None:
+            cache.reject(flight, exc)
+        raise
+    finally:
+        if flight is not None and flight.leader:
+            cache.release(flight)
 
 
 def _pick_next_attempt(
@@ -503,6 +804,27 @@ def _routing_state(request: Request) -> RoutingState:
     return cast(RoutingState, request.app.state.routing_state)
 
 
+def _cache_service(request: Request) -> CacheService:
+    return cast(CacheService, request.app.state.cache)
+
+
+def _outcome_for(result: _ChatResult) -> str:
+    if result.degraded is not None:
+        return "degraded"
+    if result.cache_header in {"hit-exact", "hit-semantic"}:
+        return "cached"
+    return "ok"
+
+
+def _cache_bypassed(
+    req: UnifiedRequest,
+    tenant: TenantConfig,
+    settings: GatewayConfig,
+) -> bool:
+    decision = read_decision(req, tenant, settings)
+    return decision.bypass_reason is not None or not decision.l1
+
+
 def _route_header(deployment: DeploymentConfig) -> str:
     return f"{deployment.provider}/{deployment.upstream_model}"
 
@@ -545,6 +867,12 @@ class _QuotaSettlement:
         final_usage = usage or self._usage
         await self._quota.settle(self._reservation, final_usage, forwarded_tokens)
         _record_quota_metrics(self._request, self._reservation, final_usage)
+
+    async def refund_full(self) -> None:
+        if self._settled:
+            return
+        self._settled = True
+        await self._quota.refund_full(self._reservation)
 
 
 async def _reserve_quota(

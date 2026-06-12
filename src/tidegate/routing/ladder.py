@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from tidegate.cache.service import CacheHit, CacheService
 from tidegate.config.models import GatewayConfig, ModelGroupConfig, PolicyConfig, TenantConfig
+from tidegate.core.models import UnifiedRequest
 
 
 @dataclass(frozen=True)
@@ -34,9 +36,16 @@ class RoutingLadder:
             self._append(levels, seen, smaller, degraded="smaller-model")
         return levels
 
-    def stale_cache(self) -> None:
-        # TODO(SPEC-M3-4): M4 wires stale-cache lookup into this hook.
-        return None
+    async def stale_cache(
+        self,
+        cache: CacheService,
+        req: UnifiedRequest,
+        tenant: TenantConfig,
+    ) -> CacheHit | None:
+        policy = self._settings.policies.get(tenant.policy, PolicyConfig())
+        if not policy.degradation.stale_cache:
+            return None
+        return await cache.lookup(req, tenant, self._settings, stale=True)
 
     def _append(
         self,

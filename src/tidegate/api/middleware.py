@@ -89,7 +89,7 @@ class AuthMiddleware:
         self._cache_version = config.version
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        data_paths = {"/v1/chat/completions", "/v1/models"}
+        data_paths = {"/v1/chat/completions", "/v1/models", "/v1/cache/feedback"}
         if scope["type"] != "http" or scope["path"] not in data_paths:
             await self._app(scope, receive, send)
             return

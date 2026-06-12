@@ -28,6 +28,7 @@ class Metrics:
     quota_settle_failed: Counter
     breaker_state: Gauge
     breaker_transitions: Counter
+    cache_events: Counter
 
     @classmethod
     def create(cls) -> Metrics:
@@ -112,6 +113,12 @@ class Metrics:
                 "tidegate_breaker_transitions",
                 "Circuit breaker transitions",
                 ("provider", "model", "to_state"),
+                registry=registry,
+            ),
+            cache_events=Counter(
+                "tidegate_cache_events",
+                "Cache events",
+                ("level", "event"),
                 registry=registry,
             ),
         )

@@ -16,6 +16,10 @@ from tidegate.api.admin import router as admin_router
 from tidegate.api.errors import install_exception_handlers
 from tidegate.api.middleware import AuthMiddleware, RequestContextMiddleware
 from tidegate.api.routes import router
+from tidegate.cache.embedding import EmbeddingService, init_embedding_worker
+from tidegate.cache.l1 import L1Cache
+from tidegate.cache.l2 import L2Cache, capacity_sweep_loop
+from tidegate.cache.service import CacheService
 from tidegate.config.holder import ConfigHolder
 from tidegate.config.models import GatewayConfig
 from tidegate.config.reloader import poll_config_version, watch_config_events
@@ -60,10 +64,32 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task_registry = TaskRegistry()
         redis_client = redis.from_url(settings.redis.url, decode_responses=False)
+        # REWORK-M2-5: token counting uses this shared CPU pool; M4 embedding has its
+        # own pool below because fastembed model weights live in worker initializers.
         cpu_pool = ProcessPoolExecutor(max_workers=settings.server.cpu_pool_workers)
+        embedding_pool: ProcessPoolExecutor | None = None
+        embedding_service: EmbeddingService | None = None
+        if any(tenant.cache.l2 for tenant in settings.tenants):
+            embedding_pool = ProcessPoolExecutor(
+                max_workers=settings.cache.l2.embed_pool_workers,
+                initializer=init_embedding_worker,
+                initargs=(
+                    settings.cache.l2.embedding_model,
+                    settings.cache.l2.model_cache_dir,
+                    settings.cache.l2.hf_endpoint,
+                ),
+            )
+            embedding_service = EmbeddingService(embedding_pool)
         quota_scripts = QuotaScripts(redis_client)
         routing_state = RoutingState(settings, metrics)
         selector = P2CSelector(settings, routing_state)
+        l2_cache = L2Cache(redis_client)
+        cache_service = CacheService(
+            L1Cache(redis_client),
+            l2_cache,
+            embedding_service,
+            metrics,
+        )
         quota_service = QuotaService(
             redis_client,
             quota_scripts,
@@ -78,6 +104,8 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         app.state.redis = redis_client
         app.state.quota = quota_service
         app.state.cpu_pool = cpu_pool
+        app.state.embedding_pool = embedding_pool
+        app.state.cache = cache_service
         app.state.routing_state = routing_state
         app.state.selector = selector
         task_registry.create(
@@ -87,6 +115,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         try:
             await redis_client.ping()
             await quota_scripts.load()
+            await l2_cache.ensure_index()
             await prewarm_from_aggregate(
                 redis_client,
                 settings,
@@ -109,6 +138,11 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             task_registry.create(
                 report_loop(redis_client, settings, routing_state), name="tidegate-routing-report"
             )
+            if embedding_service is not None:
+                task_registry.create(
+                    capacity_sweep_loop(l2_cache, lambda: holder.current),
+                    name="tidegate-cache-l2-capacity-sweep",
+                )
         try:
             yield
         finally:
@@ -116,6 +150,8 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             await provider_manager.close()
             await redis_client.aclose()
             cpu_pool.shutdown(cancel_futures=True)
+            if embedding_pool is not None:
+                embedding_pool.shutdown(cancel_futures=True)
 
     app = FastAPI(title="TideGate", lifespan=lifespan)
     app.state.config_holder = holder
