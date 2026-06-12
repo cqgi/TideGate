@@ -21,7 +21,7 @@ from tidegate.api.sse import (
     stream_chunk_payload,
     with_heartbeats,
 )
-from tidegate.config.models import GatewayConfig, TenantConfig
+from tidegate.config.models import DeploymentConfig, GatewayConfig, ModelGroupConfig, TenantConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import ChatCompletionIn, UnifiedDelta, UnifiedRequest, UnifiedResponse
@@ -29,6 +29,10 @@ from tidegate.providers.base import Provider
 from tidegate.routing.selector import pick
 
 router = APIRouter()
+
+
+class _ClientDisconnectedError(Exception):
+    pass
 
 
 @router.get("/healthz")
@@ -132,22 +136,18 @@ async def _render_stream(
     upstream: AsyncIterator[UnifiedDelta],
     incoming: ChatCompletionIn,
     provider_name: str,
-    route_header: str,
+    accounting: StreamAccounting,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
-    tenant: TenantConfig = request.state.tenant
     request_id: str = request.state.request_id
-    accounting = StreamAccounting(started_at=time.monotonic())
-    outcome = "ok"
     try:
         async for delta in with_heartbeats(upstream, settings.server.sse_heartbeat_interval_s):
             if await request.is_disconnected():
                 # SPEC-M0-5: client disconnects close upstream streaming immediately.
-                outcome = "client_disconnect"
                 request.app.state.metrics.upstream_aborted.labels(
                     provider=provider_name, reason="client_disconnect"
                 ).inc()
-                return
+                raise _ClientDisconnectedError
             if delta is None:
                 yield heartbeat_event()
                 continue
@@ -168,13 +168,89 @@ async def _render_stream(
                 yield sse_event(payload)
         yield sse_event("[DONE]")
     except asyncio.CancelledError:
-        outcome = "client_disconnect"
         request.app.state.metrics.upstream_aborted.labels(
             provider=provider_name, reason="client_disconnect"
         ).inc()
         raise
-    except GatewayError:
-        outcome = "error"
+
+
+async def _stream_with_retries(
+    *,
+    request: Request,
+    group: ModelGroupConfig,
+    unified: UnifiedRequest,
+    deadline: Deadline,
+    incoming: ChatCompletionIn,
+) -> AsyncIterator[bytes]:
+    settings: GatewayConfig = request.app.state.config_holder.current
+    tenant: TenantConfig = request.state.tenant
+    exclude: set[tuple[str, str]] = set()
+    attempts = settings.routing.max_attempts_before_first_byte
+    last_error: GatewayError | None = None
+    route_header = "none"
+    accounting = StreamAccounting(started_at=time.monotonic())
+    outcome = "error"
+    attempt_count = 0
+    try:
+        for attempt_index in range(attempts):
+            attempt_count = attempt_index + 1
+            try:
+                deployment, provider = _pick_attempt(request, group, exclude)
+            except GatewayError as exc:
+                last_error = exc
+                break
+            exclude.add((deployment.provider, deployment.upstream_model))
+            route_header = f"{deployment.provider}/{deployment.upstream_model}"
+            upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
+            sent_data = False
+            try:
+                async for chunk in _render_stream(
+                    request=request,
+                    upstream=upstream,
+                    incoming=incoming,
+                    provider_name=deployment.provider,
+                    accounting=accounting,
+                ):
+                    # DECISION: REWORK-M1-1 treats only SSE data events as the idempotency
+                    # boundary; heartbeat comments can be followed by a safe TTFT retry.
+                    if chunk.startswith(b"data:"):
+                        sent_data = True
+                    yield chunk
+                outcome = "ok"
+                return
+            except _ClientDisconnectedError:
+                outcome = "client_disconnect"
+                return
+            except GatewayError as exc:
+                last_error = exc
+                retryable = exc.category in {
+                    ErrorCategory.RETRYABLE_UPSTREAM,
+                    ErrorCategory.RATE_LIMITED_UPSTREAM,
+                    ErrorCategory.TIMEOUT_TTFT,
+                }
+                if sent_data or not retryable or attempt_index == attempts - 1:
+                    break
+                request.app.state.metrics.retry.labels(reason=exc.category.value).inc()
+                request.app.state.metrics.upstream_aborted.labels(
+                    provider=deployment.provider, reason="timeout"
+                ).inc()
+                aclose = getattr(upstream, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+                continue
+        if last_error is None:
+            last_error = GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
+        # REWORK-M1-2: once StreamingResponse has been selected, every failure is in-band.
+        structlog.get_logger().error(
+            "stream_request_failed",
+            category=last_error.category.value,
+            attempts=attempt_count,
+            route=route_header,
+        )
+        async for chunk in error_chunk(unified.request_id, incoming.model):
+            yield chunk
+    except asyncio.CancelledError:
+        outcome = "client_disconnect"
         raise
     finally:
         duration = time.monotonic() - accounting.started_at
@@ -189,65 +265,10 @@ async def _render_stream(
         )
 
 
-async def _stream_with_retries(
-    *,
-    request: Request,
-    group: Any,
-    unified: UnifiedRequest,
-    deadline: Deadline,
-    incoming: ChatCompletionIn,
-) -> AsyncIterator[bytes]:
-    settings: GatewayConfig = request.app.state.config_holder.current
-    exclude: set[tuple[str, str]] = set()
-    attempts = settings.routing.max_attempts_before_first_byte
-    last_error: GatewayError | None = None
-    for _ in range(attempts):
-        deployment, provider = _pick_attempt(request, group, exclude)
-        exclude.add((deployment.provider, deployment.upstream_model))
-        route_header = f"{deployment.provider}/{deployment.upstream_model}"
-        upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
-        sent_any = False
-        try:
-            async for chunk in _render_stream(
-                request=request,
-                upstream=upstream,
-                incoming=incoming,
-                provider_name=deployment.provider,
-                route_header=route_header,
-            ):
-                sent_any = True
-                yield chunk
-            return
-        except GatewayError as exc:
-            last_error = exc
-            if sent_any:
-                # SPEC-M1-1: stream-in-flight failures finish with error chunk + DONE.
-                async for chunk in error_chunk(unified.request_id, incoming.model):
-                    yield chunk
-                return
-            if exc.category not in {
-                ErrorCategory.RETRYABLE_UPSTREAM,
-                ErrorCategory.RATE_LIMITED_UPSTREAM,
-                ErrorCategory.TIMEOUT_TTFT,
-            }:
-                raise
-            request.app.state.metrics.retry.labels(reason=exc.category.value).inc()
-            request.app.state.metrics.upstream_aborted.labels(
-                provider=deployment.provider, reason="timeout"
-            ).inc()
-            aclose = getattr(upstream, "aclose", None)
-            if callable(aclose):
-                await aclose()
-            continue
-    if last_error is not None:
-        raise last_error
-    raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
-
-
 async def _call_non_stream_with_retries(
     *,
     request: Request,
-    group: Any,
+    group: ModelGroupConfig,
     unified: UnifiedRequest,
     deadline: Deadline,
     model: str,
@@ -279,8 +300,8 @@ async def _call_non_stream_with_retries(
 
 
 def _pick_attempt(
-    request: Request, group: Any, exclude: set[tuple[str, str]]
-) -> tuple[Any, Provider]:
+    request: Request, group: ModelGroupConfig, exclude: set[tuple[str, str]]
+) -> tuple[DeploymentConfig, Provider]:
     deployment = pick(group, exclude)
     provider = request.app.state.provider_manager.providers[deployment.provider]
     return deployment, provider
