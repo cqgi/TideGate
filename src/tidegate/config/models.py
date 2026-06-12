@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -126,7 +128,7 @@ class QuotaPlanConfig(FrozenModel):
     tpm: int = 100000
     concurrent_streams: int = 10
     monthly_budget_usd: float = 10.0
-    fail_mode: str = "closed"
+    fail_mode: Literal["open", "closed"] = "closed"
 
 
 class L1CacheConfig(FrozenModel):

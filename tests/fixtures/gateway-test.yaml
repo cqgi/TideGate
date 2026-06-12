@@ -42,6 +42,20 @@ model_groups:
         price_per_1k_output_usd: 0.0050
         supports_logprobs: true
 
+quota_plans:
+  free:
+    rpm: 600
+    tpm: 2000000
+    concurrent_streams: 100
+    monthly_budget_usd: 500
+    fail_mode: closed
+  open:
+    rpm: 600
+    tpm: 2000000
+    concurrent_streams: 100
+    monthly_budget_usd: 500
+    fail_mode: open
+
 tenants:
   - id: demo
     api_key_sha256: a69b1744aae71fddcefab5a490e09c9b51bcbe22fe74ffb5b91459c4cbb4e97b
