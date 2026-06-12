@@ -12,6 +12,7 @@ import structlog
 from tidegate.config.models import DeploymentConfig, GatewayConfig, TenantConfig
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import UnifiedRequest, Usage
+from tidegate.obs.metrics import Metrics
 from tidegate.quota.estimator import Estimate, QuotaEstimator
 from tidegate.quota.keys import (
     budget_key,
@@ -39,7 +40,20 @@ class QuotaReservation:
     deployment: DeploymentConfig
     estimate: Estimate
     snapshot: GatewayConfig
+    month: str
     redis_reserved: bool = True
+
+    def with_deployment(self, deployment: DeploymentConfig) -> QuotaReservation:
+        return QuotaReservation(
+            tenant_id=self.tenant_id,
+            request_id=self.request_id,
+            model=self.model,
+            deployment=deployment,
+            estimate=self.estimate,
+            snapshot=self.snapshot,
+            month=self.month,
+            redis_reserved=self.redis_reserved,
+        )
 
 
 class QuotaService:
@@ -49,11 +63,13 @@ class QuotaService:
         scripts: QuotaScripts,
         estimator: QuotaEstimator,
         fallback: LocalFallbackLimiter | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._redis = redis_client
         self._scripts = scripts
         self._estimator = estimator
         self._fallback = fallback or LocalFallbackLimiter()
+        self._metrics = metrics
         self._fallback_active = False
 
     async def reserve(
@@ -89,6 +105,7 @@ class QuotaService:
             str(plan.concurrent_streams),
             str(estimate.budget_cost_micro),
             str(math.ceil(plan.monthly_budget_usd * 1_000_000)),
+            month,
         ]
         try:
             async with asyncio.timeout(0.1):
@@ -112,6 +129,7 @@ class QuotaService:
             deployment=deployment,
             estimate=estimate,
             snapshot=snapshot,
+            month=month,
         )
 
     async def settle(
@@ -123,21 +141,26 @@ class QuotaService:
         if not reservation.redis_reserved:
             return
         actual_usage = actual or _fallback_usage(reservation.estimate, forwarded_tokens)
-        month = _month()
         keys = [
             tpm_key(reservation.tenant_id),
             conc_key(reservation.tenant_id),
-            budget_key(reservation.tenant_id, month),
+            budget_key(reservation.tenant_id, reservation.month),
             reservation_zset_key(reservation.tenant_id),
             reservation_data_key(reservation.tenant_id),
         ]
         actual_budget = _actual_budget_micro(actual_usage, reservation.deployment)
-        args = [reservation.request_id, str(actual_usage.total_tokens), str(actual_budget)]
+        args = [
+            reservation.request_id,
+            str(actual_usage.total_tokens),
+            str(actual_budget),
+            reservation.month,
+        ]
         try:
-            await self._scripts.settle(keys, args)
-        except redis.RedisError:
-            structlog.get_logger().warning("quota_settle_failed_once", tenant=reservation.tenant_id)
-            await self._scripts.settle(keys, args)
+            async with asyncio.timeout(reservation.snapshot.sweeper.settle_timeout_s):
+                await self._settle_with_retry(reservation, keys, args)
+        except (redis.RedisError, TimeoutError, ConnectionError) as exc:
+            self._record_settle_failure(reservation, exc)
+            return
         try:
             await self._estimator.update_correction(
                 tenant_id=reservation.tenant_id,
@@ -168,7 +191,7 @@ class QuotaService:
         ]
         result = await self._scripts.sweep(
             keys,
-            [str(_now_ms()), str(snapshot.sweeper.batch_limit)],
+            [str(_now_ms()), str(snapshot.sweeper.batch_limit), month],
         )
         return int(_decode_float(result[0]))
 
@@ -222,6 +245,7 @@ class QuotaService:
             deployment=deployment,
             estimate=estimate,
             snapshot=snapshot,
+            month=_month(),
             redis_reserved=False,
         )
 
@@ -229,6 +253,31 @@ class QuotaService:
         if self._fallback_active:
             self._fallback_active = False
             structlog.get_logger().info("quota_fallback_exited")
+
+    async def _settle_with_retry(
+        self,
+        reservation: QuotaReservation,
+        keys: list[str],
+        args: list[str],
+    ) -> None:
+        try:
+            await self._scripts.settle(keys, args)
+        except redis.RedisError as exc:
+            structlog.get_logger().warning(
+                "quota_settle_failed_once",
+                tenant=reservation.tenant_id,
+                error=str(exc),
+            )
+            await self._scripts.settle(keys, args)
+
+    def _record_settle_failure(self, reservation: QuotaReservation, exc: BaseException) -> None:
+        structlog.get_logger().error(
+            "quota_settle_failed",
+            tenant=reservation.tenant_id,
+            error=str(exc),
+        )
+        if self._metrics is not None:
+            self._metrics.quota_settle_failed.labels(reservation.tenant_id).inc()
 
 
 def _now_ms() -> int:

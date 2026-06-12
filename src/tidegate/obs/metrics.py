@@ -25,6 +25,7 @@ class Metrics:
     cost: Counter
     quota_rejections: Counter
     quota_sweep: Counter
+    quota_settle_failed: Counter
 
     @classmethod
     def create(cls) -> Metrics:
@@ -90,6 +91,12 @@ class Metrics:
             quota_sweep=Counter(
                 "tidegate_quota_sweep",
                 "Swept quota reservations",
+                ("tenant",),
+                registry=registry,
+            ),
+            quota_settle_failed=Counter(
+                "tidegate_quota_settle_failed",
+                "Quota settlement failures left for sweeper recovery",
                 ("tenant",),
                 registry=registry,
             ),
