@@ -12,6 +12,8 @@ def test_metrics_contract_names_and_labels() -> None:
     metrics.ttft.labels("mock-a", "chat-large").observe(0.1)
     metrics.overhead.observe(0.01)
     metrics.upstream_aborted.labels("mock-a", "client_disconnect").inc()
+    metrics.breaker_state.labels("mock-a", "mock-gpt-large").set(2)
+    metrics.breaker_transitions.labels("mock-a", "mock-gpt-large", "open").inc()
     body, content_type = metrics.render()
     rendered = body.decode()
     assert content_type == CONTENT_TYPE_LATEST
@@ -23,4 +25,9 @@ def test_metrics_contract_names_and_labels() -> None:
     assert "tidegate_gateway_overhead_seconds_count" in rendered
     assert (
         'tidegate_upstream_aborted_total{provider="mock-a",reason="client_disconnect"}' in rendered
+    )
+    assert 'tidegate_breaker_state{model="mock-gpt-large",provider="mock-a"} 2.0' in rendered
+    assert (
+        'tidegate_breaker_transitions_total{model="mock-gpt-large",provider="mock-a",'
+        'to_state="open"} 1.0' in rendered
     )

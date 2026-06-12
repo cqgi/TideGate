@@ -96,6 +96,7 @@ class RoutingConfig(FrozenModel):
     )
     max_attempts_before_first_byte: int = 3
     agg_report_interval_s: float = 5.0
+    agg_ttl_s: int = Field(default=60, description="Redis aggregation key TTL")
 
 
 class DegradationConfig(FrozenModel):

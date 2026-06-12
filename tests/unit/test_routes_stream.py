@@ -11,13 +11,16 @@ from fastapi import Request
 
 import tidegate.api.routes as routes
 from tidegate.config.loader import load_config
-from tidegate.config.models import DeploymentConfig, GatewayConfig, ModelGroupConfig
+from tidegate.config.models import DeploymentConfig, GatewayConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import ChatCompletionIn, UnifiedDelta, UnifiedRequest, Usage
 from tidegate.obs.metrics import Metrics
 from tidegate.quota.estimator import Estimate
 from tidegate.quota.service import QuotaReservation
+from tidegate.routing.ladder import RoutingLadder
+from tidegate.routing.selector import P2CSelector
+from tidegate.routing.stats import RoutingState
 
 
 @pytest.mark.asyncio
@@ -31,16 +34,16 @@ async def test_stream_heartbeat_does_not_block_ttft_retry(monkeypatch: pytest.Mo
             "mock-b": _SuccessfulStreamProvider(),
         },
     )
-    _force_pick_order(monkeypatch)
+    monkeypatch.setattr("tidegate.routing.selector.random.sample", lambda items, count: list(items))
 
     chunks = [
         chunk
         async for chunk in routes._stream_with_retries(
             request=cast(Request, request),
-            group=settings.model_groups["chat-large"],
             unified=_unified_request(stream=True),
             deadline=_deadline(),
             incoming=_incoming(stream=True),
+            levels=RoutingLadder(settings).levels("chat-large", settings.tenants[0]),
         )
     ]
 
@@ -68,16 +71,16 @@ async def test_stream_retry_exhaustion_returns_error_chunk(
             "mock-b": _ImmediateFailureProvider(),
         },
     )
-    _force_pick_order(monkeypatch)
+    monkeypatch.setattr("tidegate.routing.selector.random.sample", lambda items, count: list(items))
 
     chunks = [
         chunk
         async for chunk in routes._stream_with_retries(
             request=cast(Request, request),
-            group=settings.model_groups["chat-large"],
             unified=_unified_request(stream=True),
             deadline=_deadline(),
             incoming=_incoming(stream=True),
+            levels=RoutingLadder(settings).levels("chat-large", settings.tenants[0]),
         )
     ]
 
@@ -93,12 +96,16 @@ async def test_stream_retry_exhaustion_returns_error_chunk(
 class _FakeRequest:
     def __init__(self, settings: GatewayConfig, providers: dict[str, object]) -> None:
         quota = _FakeQuotaService(settings)
+        metrics = Metrics.create()
+        routing_state = RoutingState(settings, metrics)
         self.app = SimpleNamespace(
             state=SimpleNamespace(
                 config_holder=SimpleNamespace(current=settings),
-                metrics=Metrics.create(),
+                metrics=metrics,
                 provider_manager=SimpleNamespace(providers=providers),
                 quota=quota,
+                routing_state=routing_state,
+                selector=P2CSelector(settings, routing_state),
             )
         )
         self.state = SimpleNamespace(tenant=settings.tenants[0], request_id="req-test")
@@ -193,25 +200,29 @@ def _fake_request(settings: GatewayConfig, providers: dict[str, object]) -> _Fak
 
 def _settings_for_stream_tests() -> GatewayConfig:
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
+    deployments = list(settings.model_groups["chat-large"].deployments)
+    deployments[0] = deployments[0].model_copy(update={"weight": 100})
     return settings.model_copy(
         update={
             "server": settings.server.model_copy(update={"sse_heartbeat_interval_s": 0.01}),
-            "routing": settings.routing.model_copy(update={"max_attempts_before_first_byte": 2}),
+            "routing": settings.routing.model_copy(
+                update={
+                    "max_attempts_before_first_byte": 2,
+                    "p2c_weights": {
+                        "ttft": 0.0,
+                        "error_rate": 0.0,
+                        "inflight": 0.0,
+                        "price": 0.0,
+                    },
+                }
+            ),
+            "model_groups": {
+                "chat-large": settings.model_groups["chat-large"].model_copy(
+                    update={"deployments": tuple(deployments)}
+                )
+            },
         }
     )
-
-
-def _force_pick_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    def pick_in_order(
-        group: ModelGroupConfig,
-        exclude: set[tuple[str, str]],
-    ) -> DeploymentConfig:
-        for deployment in group.deployments:
-            if (deployment.provider, deployment.upstream_model) not in exclude:
-                return deployment
-        raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
-
-    monkeypatch.setattr(routes, "pick", pick_in_order)
 
 
 def _incoming(*, stream: bool) -> ChatCompletionIn:

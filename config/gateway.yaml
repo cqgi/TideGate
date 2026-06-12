@@ -42,6 +42,36 @@ model_groups:
         price_per_1k_input_usd: 0.0025
         price_per_1k_output_usd: 0.0050
         supports_logprobs: true
+  chat-small:
+    deployments:
+      - provider: mock-a
+        upstream_model: mock-gpt-small
+        weight: 1
+        price_per_1k_input_usd: 0.0003
+        price_per_1k_output_usd: 0.0006
+        supports_logprobs: true
+
+routing:
+  ewma_alpha: 0.2
+  slow_call_ttft_slo_s: 8.0
+  breaker:
+    window_size: 20
+    failure_rate_to_open: 0.5
+    min_samples: 10
+    open_cooldown_s: 30
+    cooldown_max_s: 300
+    half_open_probes: 3
+  p2c_weights: { ttft: 0.4, error_rate: 0.3, inflight: 0.2, price: 0.1 }
+  max_attempts_before_first_byte: 3
+  agg_report_interval_s: 5
+  agg_ttl_s: 60
+
+policies:
+  default:
+    fallback_chain: [chat-large]
+    degradation: { smaller_model_group: chat-small, stale_cache: true }
+    hedging: { enabled: false }
+    cascade: { enabled: false }
 
 quota_plans:
   free:

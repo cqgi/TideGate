@@ -28,6 +28,9 @@ from tidegate.quota.local_fallback import LocalFallbackLimiter
 from tidegate.quota.scripts import QuotaScripts
 from tidegate.quota.service import QuotaService
 from tidegate.quota.sweeper import sweep_loop
+from tidegate.routing.reporter import prewarm_from_aggregate, report_loop
+from tidegate.routing.selector import P2CSelector
+from tidegate.routing.stats import RoutingState
 
 
 @dataclass
@@ -59,6 +62,8 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         redis_client = redis.from_url(settings.redis.url, decode_responses=False)
         cpu_pool = ProcessPoolExecutor(max_workers=settings.server.cpu_pool_workers)
         quota_scripts = QuotaScripts(redis_client)
+        routing_state = RoutingState(settings, metrics)
+        selector = P2CSelector(settings, routing_state)
         quota_service = QuotaService(
             redis_client,
             quota_scripts,
@@ -73,6 +78,8 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         app.state.redis = redis_client
         app.state.quota = quota_service
         app.state.cpu_pool = cpu_pool
+        app.state.routing_state = routing_state
+        app.state.selector = selector
         task_registry.create(
             probe_loop_lag(metrics, settings.server.loop_lag_interval_s),
             name="tidegate-loop-lag",
@@ -80,6 +87,12 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         try:
             await redis_client.ping()
             await quota_scripts.load()
+            await prewarm_from_aggregate(
+                redis_client,
+                settings,
+                routing_state,
+                now_s=asyncio.get_running_loop().time(),
+            )
         except redis.RedisError as exc:
             # DECISION: M2 keeps serving so per-tenant fail_mode can decide open/closed fallback.
             structlog.get_logger().warning("redis_unavailable_hot_reload_disabled", error=str(exc))
@@ -92,6 +105,9 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             )
             task_registry.create(
                 sweep_loop(holder, quota_service, metrics), name="tidegate-quota-sweeper"
+            )
+            task_registry.create(
+                report_loop(redis_client, settings, routing_state), name="tidegate-routing-report"
             )
         try:
             yield

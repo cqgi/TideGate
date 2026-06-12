@@ -4,7 +4,8 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, cast
 
 import structlog
 from fastapi import APIRouter, Request
@@ -21,7 +22,7 @@ from tidegate.api.sse import (
     stream_chunk_payload,
     with_heartbeats,
 )
-from tidegate.config.models import DeploymentConfig, GatewayConfig, ModelGroupConfig, TenantConfig
+from tidegate.config.models import DeploymentConfig, GatewayConfig, TenantConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import (
@@ -33,13 +34,29 @@ from tidegate.core.models import (
 )
 from tidegate.providers.base import Provider
 from tidegate.quota.service import QuotaReservation, QuotaService
-from tidegate.routing.selector import pick
+from tidegate.routing.ladder import RouteLevel, RoutingLadder
+from tidegate.routing.selector import NoAvailableDeployment, P2CSelector, pick
+from tidegate.routing.stats import RoutingState
 
 router = APIRouter()
 
 
 class _ClientDisconnectedError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class _PickedAttempt:
+    deployment: DeploymentConfig
+    provider: Provider
+    model_group_name: str
+    degraded: str | None
+
+
+@dataclass(frozen=True)
+class _PickResult:
+    attempt: _PickedAttempt
+    level_index: int
 
 
 @router.get("/healthz")
@@ -85,8 +102,7 @@ async def chat_completions(request: Request) -> Response:
             http_status=422,
         ) from exc
 
-    group = settings.model_groups.get(incoming.model)
-    if group is None:
+    if incoming.model not in settings.model_groups:
         raise GatewayError("unknown model", ErrorCategory.CLIENT_ERROR, http_status=404)
     tenant: TenantConfig = request.state.tenant
     request_id: str = request.state.request_id
@@ -94,9 +110,11 @@ async def chat_completions(request: Request) -> Response:
     unified = _unified_request(request, incoming, raw_body, tenant, request_id)
     # REWORK-M0-1: gateway overhead is request receipt through upstream dispatch.
     request.app.state.metrics.overhead.observe(time.monotonic() - request_started)
+    levels = RoutingLadder(settings).levels(incoming.model, tenant)
     if incoming.stream:
         stream_exclude: set[tuple[str, str]] = set()
-        deployment, provider = _pick_attempt(request, group, stream_exclude)
+        picked = _pick_next_attempt(request, levels, stream_exclude, 0)
+        deployment = picked.attempt.deployment
         stream_exclude.add((deployment.provider, deployment.upstream_model))
         quota_settle = await _reserve_quota(
             request=request,
@@ -107,34 +125,38 @@ async def chat_completions(request: Request) -> Response:
         return DisconnectAwareStreamingResponse(
             _stream_with_retries(
                 request=request,
-                group=group,
                 unified=unified,
                 deadline=deadline,
                 incoming=incoming,
-                first_attempt=(deployment, provider, quota_settle),
+                levels=levels,
+                first_attempt=(picked.attempt, quota_settle),
                 exclude=stream_exclude,
+                level_index=picked.level_index,
             ),
             media_type="text/event-stream",
             headers={
                 "X-TideGate-Cache": "miss",
+                "X-TideGate-Route": _route_header(picked.attempt.deployment),
+                **_degraded_header(picked.attempt.degraded),
             },
         )
 
     started = time.monotonic()
-    response, route_header = await _call_non_stream_with_retries(
+    response, route_header, degraded = await _call_non_stream_with_retries(
         request=request,
-        group=group,
+        levels=levels,
         unified=unified,
         deadline=deadline,
         model=incoming.model,
     )
     duration = time.monotonic() - started
-    request.app.state.metrics.requests.labels(tenant.id, incoming.model, "ok").inc()
+    outcome = "degraded" if degraded is not None else "ok"
+    request.app.state.metrics.requests.labels(tenant.id, incoming.model, outcome).inc()
     structlog.get_logger().info(
         "access",
         tenant=tenant.id,
         model=incoming.model,
-        outcome="ok",
+        outcome=outcome,
         route=route_header,
         ttft_ms=None,
         duration_ms=duration * 1000,
@@ -144,7 +166,11 @@ async def chat_completions(request: Request) -> Response:
     )
     return JSONResponse(
         _non_stream_payload(request_id, incoming.model, response),
-        headers={"X-TideGate-Cache": "miss", "X-TideGate-Route": route_header},
+        headers={
+            "X-TideGate-Cache": "miss",
+            "X-TideGate-Route": route_header,
+            **_degraded_header(degraded),
+        },
     )
 
 
@@ -156,6 +182,7 @@ async def _render_stream(
     provider_name: str,
     accounting: StreamAccounting,
     quota_settle: _QuotaSettlement,
+    attempt_started_at: float,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
     request_id: str = request.state.request_id
@@ -172,7 +199,7 @@ async def _render_stream(
                 continue
             now = time.monotonic()
             if accounting.ttft_ms is None and delta.content:
-                accounting.ttft_ms = (now - accounting.started_at) * 1000
+                accounting.ttft_ms = (now - attempt_started_at) * 1000
                 request.app.state.metrics.ttft.labels(provider_name, incoming.model).observe(
                     accounting.ttft_ms / 1000
                 )
@@ -197,12 +224,13 @@ async def _render_stream(
 async def _stream_with_retries(
     *,
     request: Request,
-    group: ModelGroupConfig,
     unified: UnifiedRequest,
     deadline: Deadline,
     incoming: ChatCompletionIn,
-    first_attempt: tuple[DeploymentConfig, Provider, _QuotaSettlement] | None = None,
+    levels: list[RouteLevel],
+    first_attempt: tuple[_PickedAttempt, _QuotaSettlement] | None = None,
     exclude: set[tuple[str, str]] | None = None,
+    level_index: int = 0,
 ) -> AsyncIterator[bytes]:
     settings: GatewayConfig = request.app.state.config_holder.current
     tenant: TenantConfig = request.state.tenant
@@ -214,31 +242,45 @@ async def _stream_with_retries(
     outcome = "error"
     attempt_count = 0
     quota_settle: _QuotaSettlement | None = None
+    routing_state = _routing_state(request)
     try:
         for attempt_index in range(attempts):
             attempt_count = attempt_index + 1
             if attempt_index == 0 and first_attempt is not None:
-                deployment, provider, quota_settle = first_attempt
+                picked, quota_settle = first_attempt
             else:
                 try:
-                    deployment, provider = _pick_attempt(request, group, attempted)
+                    result = _pick_next_attempt(request, levels, attempted, level_index)
+                    picked = result.attempt
+                    level_index = result.level_index
                     if quota_settle is None:
                         quota_settle = await _reserve_quota(
                             request=request,
-                            deployment=deployment,
+                            deployment=picked.deployment,
                             unified=unified,
                             snapshot=settings,
                         )
                 except GatewayError as exc:
                     last_error = exc
                     break
-                attempted.add((deployment.provider, deployment.upstream_model))
+                attempted.add((picked.deployment.provider, picked.deployment.upstream_model))
+            deployment = picked.deployment
+            provider = picked.provider
             if quota_settle is not None:
                 quota_settle.use_deployment(deployment)
             else:
                 last_error = GatewayError("quota reservation missing", ErrorCategory.INTERNAL)
                 break
-            route_header = f"{deployment.provider}/{deployment.upstream_model}"
+            route_header = _route_header(deployment)
+            attempt_started_at = time.monotonic()
+            try:
+                routing_state.record_start(deployment, now_s=time.monotonic())
+            except GatewayError as exc:
+                if quota_settle is not None:
+                    await quota_settle.settle_once(None, 0)
+                    quota_settle = None
+                last_error = exc
+                continue
             upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
             sent_data = False
             try:
@@ -249,19 +291,36 @@ async def _stream_with_retries(
                     provider_name=deployment.provider,
                     accounting=accounting,
                     quota_settle=quota_settle,
+                    attempt_started_at=attempt_started_at,
                 ):
                     # DECISION: REWORK-M1-1 treats only SSE data events as the idempotency
                     # boundary; heartbeat comments can be followed by a safe TTFT retry.
                     if chunk.startswith(b"data:"):
                         sent_data = True
                     yield chunk
+                routing_state.record_finish(
+                    deployment,
+                    success=True,
+                    ttft_s=_ttft_s(accounting),
+                    now_s=time.monotonic(),
+                )
                 outcome = "ok"
+                if picked.degraded is not None:
+                    outcome = "degraded"
                 return
             except _ClientDisconnectedError:
                 outcome = "client_disconnect"
+                routing_state.record_abort(deployment)
                 return
             except GatewayError as exc:
                 last_error = exc
+                _record_route_error(
+                    request,
+                    deployment,
+                    exc,
+                    ttft_s=_ttft_s(accounting),
+                    now_s=time.monotonic(),
+                )
                 retryable = exc.category in {
                     ErrorCategory.RETRYABLE_UPSTREAM,
                     ErrorCategory.RATE_LIMITED_UPSTREAM,
@@ -309,31 +368,61 @@ async def _stream_with_retries(
 async def _call_non_stream_with_retries(
     *,
     request: Request,
-    group: ModelGroupConfig,
+    levels: list[RouteLevel],
     unified: UnifiedRequest,
     deadline: Deadline,
     model: str,
-) -> tuple[UnifiedResponse, str]:
+) -> tuple[UnifiedResponse, str, str | None]:
     settings: GatewayConfig = request.app.state.config_holder.current
     exclude: set[tuple[str, str]] = set()
     last_error: GatewayError | None = None
+    level_index = 0
+    routing_state = _routing_state(request)
     for _ in range(settings.routing.max_attempts_before_first_byte):
-        deployment, provider = _pick_attempt(request, group, exclude)
+        try:
+            result = _pick_next_attempt(request, levels, exclude, level_index)
+        except GatewayError as exc:
+            last_error = exc
+            break
+        picked = result.attempt
+        level_index = result.level_index
+        deployment = picked.deployment
+        provider = picked.provider
         exclude.add((deployment.provider, deployment.upstream_model))
-        route_header = f"{deployment.provider}/{deployment.upstream_model}"
+        route_header = _route_header(deployment)
         quota_settle = await _reserve_quota(
             request=request,
             deployment=deployment,
             unified=unified,
             snapshot=settings,
         )
+        attempt_started_at = time.monotonic()
         try:
-            response = await provider.chat(unified, deployment.upstream_model, deadline)
-            await quota_settle.settle_once(response.usage, response.usage.completion_tokens)
-            return response, route_header
+            routing_state.record_start(deployment, now_s=time.monotonic())
         except GatewayError as exc:
             await quota_settle.settle_once(None, 0)
             last_error = exc
+            continue
+        try:
+            response = await provider.chat(unified, deployment.upstream_model, deadline)
+            await quota_settle.settle_once(response.usage, response.usage.completion_tokens)
+            routing_state.record_finish(
+                deployment,
+                success=True,
+                ttft_s=time.monotonic() - attempt_started_at,
+                now_s=time.monotonic(),
+            )
+            return response, route_header, picked.degraded
+        except GatewayError as exc:
+            await quota_settle.settle_once(None, 0)
+            last_error = exc
+            _record_route_error(
+                request,
+                deployment,
+                exc,
+                ttft_s=time.monotonic() - attempt_started_at,
+                now_s=time.monotonic(),
+            )
             if exc.category not in {
                 ErrorCategory.RETRYABLE_UPSTREAM,
                 ErrorCategory.RATE_LIMITED_UPSTREAM,
@@ -348,12 +437,87 @@ async def _call_non_stream_with_retries(
     raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
 
 
+def _pick_next_attempt(
+    request: Request,
+    levels: list[RouteLevel],
+    exclude: set[tuple[str, str]],
+    level_index: int,
+) -> _PickResult:
+    last_error: GatewayError | None = None
+    for index in range(level_index, len(levels)):
+        level = levels[index]
+        try:
+            attempt = _pick_attempt(request, level, exclude)
+        except NoAvailableDeployment as exc:
+            last_error = exc
+            continue
+        return _PickResult(attempt, index)
+    if last_error is not None:
+        raise last_error
+    raise NoAvailableDeployment()
+
+
 def _pick_attempt(
-    request: Request, group: ModelGroupConfig, exclude: set[tuple[str, str]]
-) -> tuple[DeploymentConfig, Provider]:
-    deployment = pick(group, exclude)
+    request: Request,
+    level: RouteLevel,
+    exclude: set[tuple[str, str]],
+) -> _PickedAttempt:
+    selector: P2CSelector | None = getattr(request.app.state, "selector", None)
+    if selector is None:
+        deployment = pick(level.group, exclude)
+    else:
+        deployment = selector.pick(
+            level.group,
+            exclude,
+            now_s=asyncio.get_running_loop().time(),
+        )
     provider = request.app.state.provider_manager.providers[deployment.provider]
-    return deployment, provider
+    return _PickedAttempt(deployment, provider, level.model_group_name, level.degraded)
+
+
+def _record_route_error(
+    request: Request,
+    deployment: DeploymentConfig,
+    exc: GatewayError,
+    *,
+    ttft_s: float | None,
+    now_s: float,
+) -> None:
+    routing_state = _routing_state(request)
+    if exc.category == ErrorCategory.RATE_LIMITED_UPSTREAM:
+        settings: GatewayConfig = request.app.state.config_holder.current
+        retry_after_s = exc.retry_after_s or settings.routing.breaker.open_cooldown_s
+        routing_state.record_rate_limit(deployment, retry_after_s, now_s)
+        return
+    if exc.category in {
+        ErrorCategory.RETRYABLE_UPSTREAM,
+        ErrorCategory.TIMEOUT_TTFT,
+        ErrorCategory.TIMEOUT_STALL,
+        ErrorCategory.TIMEOUT_TOTAL,
+    }:
+        routing_state.record_finish(deployment, success=False, ttft_s=ttft_s, now_s=now_s)
+        return
+    routing_state.record_abort(deployment)
+
+
+def _routing_state(request: Request) -> RoutingState:
+    return cast(RoutingState, request.app.state.routing_state)
+
+
+def _route_header(deployment: DeploymentConfig) -> str:
+    return f"{deployment.provider}/{deployment.upstream_model}"
+
+
+def _degraded_header(degraded: str | None) -> dict[str, str]:
+    if degraded is None:
+        return {}
+    return {"X-TideGate-Degraded": degraded}
+
+
+def _ttft_s(accounting: StreamAccounting) -> float | None:
+    if accounting.ttft_ms is None:
+        return None
+    return accounting.ttft_ms / 1000
 
 
 class _QuotaSettlement:

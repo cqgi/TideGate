@@ -11,11 +11,15 @@ from tidegate.config.reloader import apply_reload, publish_reload
 router = APIRouter()
 
 
-@router.post("/admin/config/reload")
-async def reload_config(request: Request) -> JSONResponse:
+def _authorized(request: Request) -> bool:
     token = request.headers.get("X-Admin-Token", "")
     expected = os.getenv("TIDEGATE_ADMIN_TOKEN", "")
-    if not expected or token != expected:
+    return bool(expected and token == expected)
+
+
+@router.post("/admin/config/reload")
+async def reload_config(request: Request) -> JSONResponse:
+    if not _authorized(request):
         return JSONResponse(
             {
                 "error": {
@@ -41,3 +45,19 @@ async def reload_config(request: Request) -> JSONResponse:
         request.app.state.config_holder.current, version=version
     )
     return JSONResponse({"ok": True, "version": version})
+
+
+@router.get("/admin/breakers")
+async def breakers(request: Request) -> JSONResponse:
+    if not _authorized(request):
+        return JSONResponse(
+            {
+                "error": {
+                    "message": "invalid admin token",
+                    "type": "authentication_error",
+                    "code": None,
+                }
+            },
+            status_code=401,
+        )
+    return JSONResponse({"breakers": request.app.state.routing_state.snapshot()})

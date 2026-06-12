@@ -26,6 +26,8 @@ class Metrics:
     quota_rejections: Counter
     quota_sweep: Counter
     quota_settle_failed: Counter
+    breaker_state: Gauge
+    breaker_transitions: Counter
 
     @classmethod
     def create(cls) -> Metrics:
@@ -98,6 +100,18 @@ class Metrics:
                 "tidegate_quota_settle_failed",
                 "Quota settlement failures left for sweeper recovery",
                 ("tenant",),
+                registry=registry,
+            ),
+            breaker_state=Gauge(
+                "tidegate_breaker_state",
+                "Circuit breaker state by deployment: 0=closed, 1=half_open, 2=open",
+                ("provider", "model"),
+                registry=registry,
+            ),
+            breaker_transitions=Counter(
+                "tidegate_breaker_transitions",
+                "Circuit breaker transitions",
+                ("provider", "model", "to_state"),
                 registry=registry,
             ),
         )
