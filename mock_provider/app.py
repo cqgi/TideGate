@@ -13,6 +13,7 @@ from mock_provider.generator import (
     MockDirective,
     chat_completion_response,
     directive_from_header,
+    directive_from_mapping,
     stream_chunks,
 )
 
@@ -42,11 +43,17 @@ class ProviderStats:
 def create_app(defaults: MockDefaults) -> FastAPI:
     app = FastAPI(title="TideGate Mock Provider")
     stats = ProviderStats()
+    behavior: dict[str, object] | None = None
 
     @app.post("/v1/chat/completions", response_model=None)
     async def chat_completions(request: Request) -> Response:
+        nonlocal behavior
         body = await request.json()
-        directive = directive_from_header(request, defaults)
+        directive = (
+            directive_from_header(request, defaults)
+            if request.headers.get("x-mock-directive") is not None
+            else directive_from_mapping(behavior, defaults)
+        )
         if directive.fail == "error_500":
             raise HTTPException(status_code=500, detail="mock upstream error")
         if directive.fail == "error_429":
@@ -81,8 +88,27 @@ def create_app(defaults: MockDefaults) -> FastAPI:
 
     @app.post("/__reset")
     async def reset_provider_stats() -> dict[str, int]:
+        nonlocal behavior
         stats.reset()
+        behavior = None
         return stats.snapshot()
+
+    @app.post("/__behavior")
+    async def set_behavior(request: Request) -> dict[str, object]:
+        nonlocal behavior
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="behavior must be an object")
+        directive = directive_from_mapping(payload, defaults)
+        behavior = {
+            "ttft_ms": directive.ttft_ms,
+            "tpot_ms": directive.tpot_ms,
+            "output_tokens": directive.output_tokens,
+            "fail": directive.fail,
+            "fail_n": directive.fail_n,
+            "retry_after_s": directive.retry_after_s,
+        }
+        return {"ok": True, "behavior": behavior}
 
     return app
 

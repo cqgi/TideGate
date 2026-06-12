@@ -7,7 +7,7 @@ import random
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import HTTPException, Request
 
@@ -34,6 +34,12 @@ class MockDefaults:
 
 
 def directive_from_header(request: Request, defaults: MockDefaults) -> MockDirective:
+    return directive_from_mapping(request.headers.get("x-mock-directive"), defaults)
+
+
+def directive_from_mapping(
+    raw: str | dict[str, object] | None, defaults: MockDefaults
+) -> MockDirective:
     base_ttft = defaults.ttft_ms
     if defaults.ttft_lognorm_mu is not None and defaults.ttft_lognorm_sigma is not None:
         base_ttft = max(
@@ -51,12 +57,11 @@ def directive_from_header(request: Request, defaults: MockDefaults) -> MockDirec
         fail_n=10,
         retry_after_s=5,
     )
-    raw = request.headers.get("x-mock-directive")
     if raw is None:
         return directive
 
-    parsed = json.loads(raw)
-    fail = parsed.get("fail", directive.fail)
+    parsed = json.loads(raw) if isinstance(raw, str) else raw
+    fail = str(parsed.get("fail", directive.fail))
     if fail not in {
         "none",
         "error_500",
@@ -67,13 +72,22 @@ def directive_from_header(request: Request, defaults: MockDefaults) -> MockDirec
     }:
         raise HTTPException(status_code=422, detail="invalid mock fail directive")
     return MockDirective(
-        ttft_ms=int(parsed.get("ttft_ms", directive.ttft_ms)),
-        tpot_ms=int(parsed.get("tpot_ms", directive.tpot_ms)),
-        output_tokens=int(parsed.get("output_tokens", directive.output_tokens)),
-        fail=fail,
-        fail_n=int(parsed.get("fail_n", directive.fail_n)),
-        retry_after_s=int(parsed.get("retry_after_s", directive.retry_after_s)),
+        ttft_ms=_int_field(parsed, "ttft_ms", directive.ttft_ms),
+        tpot_ms=_int_field(parsed, "tpot_ms", directive.tpot_ms),
+        output_tokens=_int_field(parsed, "output_tokens", directive.output_tokens),
+        fail=cast(MockFail, fail),
+        fail_n=_int_field(parsed, "fail_n", directive.fail_n),
+        retry_after_s=_int_field(parsed, "retry_after_s", directive.retry_after_s),
     )
+
+
+def _int_field(parsed: dict[str, object], key: str, default: int) -> int:
+    value = parsed.get(key, default)
+    if isinstance(value, bool):
+        raise HTTPException(status_code=422, detail=f"invalid mock integer field: {key}")
+    if isinstance(value, int | float | str):
+        return int(value)
+    raise HTTPException(status_code=422, detail=f"invalid mock integer field: {key}")
 
 
 def prompt_tokens(body: dict[str, object]) -> int:
