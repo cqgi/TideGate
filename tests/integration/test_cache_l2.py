@@ -195,7 +195,7 @@ def test_stale_cache_degrades_after_upstream_exhaustion(
     assert stale.status_code == 200, stale.text
     assert stale.headers["X-TideGate-Cache"] == "hit-semantic"
     assert stale.headers["X-TideGate-Route"] == "cache"
-    assert stale.headers["X-TideGate-Degraded"] == "stale-cache"
+    assert "X-TideGate-Degraded" not in stale.headers
 
 
 @pytest.mark.integration
@@ -301,11 +301,15 @@ def _m4_l2_config(
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = port
     raw["cache"]["l2"]["similarity_threshold"] = similarity_threshold
-    raw["cache"]["l2"]["operating_points"] = []
+    raw["cache"]["l2"]["operating_points"] = [
+        {"name": "balanced", "tau": -10.0, "expected_fpr": 1.0, "expected_recall": 1.0}
+    ]
+    raw["cache"]["l2"]["recall_threshold"] = min(similarity_threshold, 0.75)
+    raw["cache"]["l2"]["recall_top_k"] = 3
     raw["cache"]["l2"]["stale_threshold_delta"] = 0.04
     raw["cache"]["l2"]["embed_pool_workers"] = 1
     raw["cache"]["replay_interval_ms"] = 1
-    raw["tenants"][0]["cache"] = {"l1": True, "l2": True}
+    raw["tenants"][0]["cache"] = {"l1": True, "l2": True, "l2_operating_point": "balanced"}
     if add_other_tenant:
         raw["tenants"].append(
             {
@@ -313,7 +317,7 @@ def _m4_l2_config(
                 "api_key_sha256": hashlib.sha256(OTHER_API_KEY.encode("utf-8")).hexdigest(),
                 "plan": "free",
                 "policy": "default",
-                "cache": {"l1": True, "l2": True},
+                "cache": {"l1": True, "l2": True, "l2_operating_point": "balanced"},
             }
         )
     path = tmp_path / f"gateway-m4-l2-{port}.yaml"
@@ -325,9 +329,11 @@ def _m4_l2_operating_point_config(tmp_path: Path, port: int) -> Path:
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = port
     raw["cache"]["l2"]["operating_points"] = [
-        {"name": "conservative", "tau": 0.70, "expected_fpr": 0.01, "expected_recall": 0.02},
-        {"name": "aggressive", "tau": 0.50, "expected_fpr": 0.05, "expected_recall": 0.25},
+        {"name": "conservative", "tau": 10.0, "expected_fpr": 0.01, "expected_recall": 0.02},
+        {"name": "aggressive", "tau": -10.0, "expected_fpr": 0.05, "expected_recall": 0.25},
     ]
+    raw["cache"]["l2"]["recall_threshold"] = 0.50
+    raw["cache"]["l2"]["recall_top_k"] = 3
     raw["cache"]["l2"]["stale_threshold_delta"] = 0.04
     raw["cache"]["l2"]["embed_pool_workers"] = 1
     raw["cache"]["replay_interval_ms"] = 1

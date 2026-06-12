@@ -34,6 +34,8 @@ class _L1Store(Protocol):
 class _EmbeddingClient(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
+    async def rerank(self, pairs: list[tuple[str, str]]) -> list[float]: ...
+
 
 class CacheService:
     def __init__(
@@ -79,26 +81,46 @@ class CacheService:
                 self._metrics.cache_events.labels("l2", "skip").inc()
             return None
         with start_span("cache.l2", {"stale": stale}):
-            hit = await self._lookup_l2(req, tenant, settings, stale=stale)
-        if hit is None:
+            reranked = await self._lookup_l2(req, tenant, settings, stale=stale)
+        if reranked is None:
             self._metrics.cache_events.labels("l2", "miss").inc()
             return None
+        hit, response = reranked
+        try:
+            await self._l2.mark_hit(hit.entry_id)
+        except redis.RedisError:
+            self._metrics.cache_events.labels("l2", "skip").inc()
+            return None
+        self._metrics.cache_events.labels("l2", "hit").inc()
+        return CacheHit(response, "hit-semantic", hit.entry_id)
+
+    async def _candidate_response(self, hit: SemanticHit, *, stale: bool) -> UnifiedResponse | None:
         try:
             with start_span("cache.l1", {"stale": stale, "semantic_hit": True}):
                 response = await self._l1.get(hit.l1_key)
         except redis.RedisError:
             self._metrics.cache_events.labels("l1", "skip").inc()
             return None
-        if response is None:
-            try:
-                await self._l2.delete(hit.entry_id)
-            except redis.RedisError:
-                self._metrics.cache_events.labels("l2", "skip").inc()
-                return None
-            self._metrics.cache_events.labels("l2", "miss").inc()
-            return None
-        self._metrics.cache_events.labels("l2", "hit").inc()
-        return CacheHit(response, "hit-semantic", hit.entry_id)
+        if response is not None:
+            return response
+        try:
+            await self._l2.delete(hit.entry_id)
+        except redis.RedisError:
+            self._metrics.cache_events.labels("l2", "skip").inc()
+        return None
+
+    async def _responses_for_candidates(
+        self,
+        candidates: list[SemanticHit],
+        *,
+        stale: bool,
+    ) -> list[tuple[SemanticHit, UnifiedResponse]]:
+        usable: list[tuple[SemanticHit, UnifiedResponse]] = []
+        for candidate in candidates:
+            response = await self._candidate_response(candidate, stale=stale)
+            if response is not None:
+                usable.append((candidate, response))
+        return usable
 
     def acquire(self, key: str) -> Flight[UnifiedResponse]:
         return self._singleflight.acquire(key)
@@ -135,12 +157,14 @@ class CacheService:
         if store_l2 and self._embedding is not None:
             try:
                 async with asyncio.timeout(settings.cache.l2.store_timeout_ms / 1000):
-                    vector = (await self._embedding.embed([semantic_text(req)]))[0]
+                    text = semantic_text(req)
+                    vector = (await self._embedding.embed([text]))[0]
                     await self._l2.store(
                         tenant_id=tenant.id,
                         prompt_version=req.prompt_version,
                         vector=vector,
                         l1_key=key,
+                        text=text,
                         settings=settings,
                     )
             except (TimeoutError, redis.RedisError):
@@ -171,24 +195,63 @@ class CacheService:
         settings: GatewayConfig,
         *,
         stale: bool,
-    ) -> SemanticHit | None:
+    ) -> tuple[SemanticHit, UnifiedResponse] | None:
         if self._embedding is None:
             return None
-        threshold = _tenant_l2_threshold(tenant, settings)
+        rerank_threshold = _tenant_l2_threshold(tenant, settings)
         if stale:
-            threshold -= settings.cache.l2.stale_threshold_delta
+            rerank_threshold -= settings.cache.l2.stale_threshold_delta
         try:
             async with asyncio.timeout(settings.cache.l2.query_timeout_ms / 1000):
-                vector = (await self._embedding.embed([semantic_text(req)]))[0]
-                return await self._l2.lookup(
+                query_text = semantic_text(req)
+                vector = (await self._embedding.embed([query_text]))[0]
+                candidates = await self._l2.lookup(
                     tenant_id=tenant.id,
                     prompt_version=req.prompt_version,
                     vector=vector,
-                    threshold=threshold,
+                    threshold=settings.cache.l2.recall_threshold,
+                    top_k=settings.cache.l2.recall_top_k,
                     timeout_ms=settings.cache.l2.query_timeout_ms,
+                )
+                usable = await self._responses_for_candidates(candidates, stale=stale)
+                if not usable:
+                    return None
+                # DECISION: SPEC-F diagnostics showed positive p50=0.796 and negative
+                # p90=0.857 for bge-small-zh-v1.5, so cosine only gates recall; reranker
+                # owns false-hit budget even though calibrated recall remains data-bound.
+                pairs = [(query_text, hit.text) for hit, _ in usable]
+                rerank_scores = await self._embedding.rerank(pairs)
+                return _best_reranked_hit(
+                    usable,
+                    rerank_scores,
+                    threshold=rerank_threshold,
                 )
         except TimeoutError:
             return None
+
+
+def _best_reranked_hit(
+    candidates: list[tuple[SemanticHit, UnifiedResponse]],
+    rerank_scores: list[float],
+    *,
+    threshold: float,
+) -> tuple[SemanticHit, UnifiedResponse] | None:
+    if len(candidates) != len(rerank_scores):
+        return None
+    scored = [
+        (score, hit, response)
+        for (hit, response), score in zip(candidates, rerank_scores, strict=True)
+    ]
+    if not scored:
+        return None
+    score, hit, response = max(scored, key=lambda item: item[0])
+    # DECISION: SPEC-F-2 moves tenant operating points from bi-encoder cosine to
+    # reranker score; recall_threshold stays wide and only gates candidates into rerank.
+    if score < threshold:
+        return None
+    return SemanticHit(
+        entry_id=hit.entry_id, l1_key=hit.l1_key, score=score, text=hit.text
+    ), response
 
 
 def _tenant_l2_threshold(tenant: TenantConfig, settings: GatewayConfig) -> float:

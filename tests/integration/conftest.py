@@ -54,6 +54,7 @@ def l2_model_ready() -> None:
             config.cache.l2.embedding_model,
             config.cache.l2.model_cache_dir,
             config.cache.l2.hf_endpoint,
+            config.cache.l2.reranker_model,
         )
         embed_sync(["模型预热"])
     except Exception as exc:

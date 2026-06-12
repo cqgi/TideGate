@@ -23,6 +23,7 @@ class SemanticHit:
     entry_id: str
     l1_key: str
     score: float
+    text: str = ""
 
 
 class L2Cache:
@@ -68,14 +69,16 @@ class L2Cache:
         prompt_version: str,
         vector: list[float],
         threshold: float,
+        top_k: int,
         timeout_ms: int,
-    ) -> SemanticHit | None:
+    ) -> list[SemanticHit]:
+        top_k = max(1, top_k)
         try:
             async with asyncio.timeout(timeout_ms / 1000):
                 query = (
                     f"(@tenant:{{{_tag_value(tenant_id)}}} "
                     f"@prompt_version:{{{_tag_value(prompt_version)}}})"
-                    "=>[KNN 1 @vec $vec AS dist]"
+                    f"=>[KNN {top_k} @vec $vec AS dist]"
                 )
                 rows = await self._execute(
                     "FT.SEARCH",
@@ -86,26 +89,28 @@ class L2Cache:
                     "vec",
                     _pack(vector),
                     "RETURN",
-                    "2",
+                    "3",
                     "l1_key",
+                    "text",
                     "dist",
                     "SORTBY",
                     "dist",
+                    "LIMIT",
+                    "0",
+                    str(top_k),
                     "DIALECT",
                     "2",
                 )
         except (TimeoutError, redis.RedisError):
-            return None
-        parsed = _parse_search(rows)
-        if parsed is None:
-            return None
-        key, l1_key, distance = parsed
-        score = 1.0 - distance
-        if score < threshold:
-            return None
-        entry_id = key.removeprefix("semcache:")
-        await self._redis.hset(key, mapping={"last_hit_at": str(time.time())})
-        return SemanticHit(entry_id=entry_id, l1_key=l1_key, score=score)
+            return []
+        hits: list[SemanticHit] = []
+        for key, l1_key, text, distance in _parse_search(rows):
+            score = 1.0 - distance
+            if score < threshold:
+                continue
+            entry_id = key.removeprefix("semcache:")
+            hits.append(SemanticHit(entry_id=entry_id, l1_key=l1_key, score=score, text=text))
+        return hits
 
     async def store(
         self,
@@ -114,8 +119,10 @@ class L2Cache:
         prompt_version: str,
         vector: list[float],
         l1_key: str,
+        text: str,
         settings: GatewayConfig,
     ) -> str:
+        del settings
         entry_id = str(ulid.new())
         now = str(time.time())
         await self._redis.hset(
@@ -125,11 +132,15 @@ class L2Cache:
                 "prompt_version": prompt_version,
                 "vec": _pack(vector),
                 "l1_key": l1_key,
+                "text": text,
                 "created_at": now,
                 "last_hit_at": now,
             },
         )
         return entry_id
+
+    async def mark_hit(self, entry_id: str) -> None:
+        await self._redis.hset(semcache_key(entry_id), mapping={"last_hit_at": str(time.time())})
 
     async def delete(self, entry_id: str) -> None:
         await self._redis.delete(semcache_key(entry_id))
@@ -173,62 +184,84 @@ def _tag_value(value: str) -> str:
     return value.translate(str.maketrans(replacements))
 
 
-def _parse_search(rows: Any) -> tuple[str, str, float] | None:
+def _parse_search(rows: Any) -> list[tuple[str, str, str, float]]:
     if isinstance(rows, dict):
         return _parse_search_dict(rows)
     if not isinstance(rows, list) or not rows or int(rows[0]) == 0:
-        return None
-    if len(rows) < 3:
-        return None
-    key = rows[1]
-    fields = rows[2]
+        return []
+    parsed: list[tuple[str, str, str, float]] = []
+    for index in range(1, len(rows) - 1, 2):
+        item = _parse_search_row(rows[index], rows[index + 1])
+        if item is not None:
+            parsed.append(item)
+    return parsed
+
+
+def _parse_search_row(key: object, fields: object) -> tuple[str, str, str, float] | None:
     if isinstance(key, bytes):
         key = key.decode()
     if not isinstance(fields, list):
         return None
     values: dict[str, object] = {}
-    for index in range(0, len(fields), 2):
+    for index in range(0, len(fields) - 1, 2):
         field = fields[index]
         value = fields[index + 1]
         if isinstance(field, bytes):
             field = field.decode()
         values[str(field)] = value
     l1_key = values.get("l1_key")
+    text = values.get("text")
     distance = values.get("dist")
     if isinstance(l1_key, bytes):
         l1_key = l1_key.decode()
+    if isinstance(text, bytes):
+        text = text.decode()
     if isinstance(distance, bytes):
         distance = distance.decode()
-    if not isinstance(l1_key, str) or not isinstance(distance, str | float | int):
+    if (
+        not isinstance(key, str)
+        or not isinstance(l1_key, str)
+        or not isinstance(text, str)
+        or not isinstance(distance, str | float | int)
+    ):
         return None
-    return str(key), l1_key, float(distance)
+    return key, l1_key, text, float(distance)
 
 
-def _parse_search_dict(rows: dict[Any, Any]) -> tuple[str, str, float] | None:
+def _parse_search_dict(rows: dict[Any, Any]) -> list[tuple[str, str, str, float]]:
     total = _dict_get(rows, "total_results")
     if not isinstance(total, int) or total == 0:
-        return None
+        return []
     results = _dict_get(rows, "results")
     if not isinstance(results, list) or not results:
-        return None
-    row = results[0]
-    if not isinstance(row, dict):
-        return None
-    key = _dict_get(row, "id")
-    attrs = _dict_get(row, "extra_attributes")
-    if isinstance(key, bytes):
-        key = key.decode()
-    if not isinstance(key, str) or not isinstance(attrs, dict):
-        return None
-    l1_key = _dict_get(attrs, "l1_key")
-    distance = _dict_get(attrs, "dist")
-    if isinstance(l1_key, bytes):
-        l1_key = l1_key.decode()
-    if isinstance(distance, bytes):
-        distance = distance.decode()
-    if not isinstance(l1_key, str) or not isinstance(distance, str | float | int):
-        return None
-    return key, l1_key, float(distance)
+        return []
+    parsed: list[tuple[str, str, str, float]] = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        key = _dict_get(row, "id")
+        attrs = _dict_get(row, "extra_attributes")
+        if isinstance(key, bytes):
+            key = key.decode()
+        if not isinstance(key, str) or not isinstance(attrs, dict):
+            continue
+        l1_key = _dict_get(attrs, "l1_key")
+        text = _dict_get(attrs, "text")
+        distance = _dict_get(attrs, "dist")
+        if isinstance(l1_key, bytes):
+            l1_key = l1_key.decode()
+        if isinstance(text, bytes):
+            text = text.decode()
+        if isinstance(distance, bytes):
+            distance = distance.decode()
+        if (
+            not isinstance(l1_key, str)
+            or not isinstance(text, str)
+            or not isinstance(distance, str | float | int)
+        ):
+            continue
+        parsed.append((key, l1_key, text, float(distance)))
+    return parsed
 
 
 def _dict_get(data: dict[Any, Any], name: str) -> Any:

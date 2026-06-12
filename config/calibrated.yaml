@@ -1,28 +1,35 @@
 cache:
   l2:
-    similarity_threshold: 0.955
+    similarity_threshold: 6.8
+    recall_top_k: 3
+    recall_threshold: 0.654424
+    reranker_model: BAAI/bge-reranker-base
     operating_points:
     - name: conservative
-      tau: 0.955
-      expected_fpr: 0.003279
-      expected_recall: 0.016
+      tau: 6.8
+      expected_fpr: 0.009836
+      expected_recall: 0.088
     - name: balanced
-      tau: 0.925
-      expected_fpr: 0.019672
-      expected_recall: 0.028
+      tau: 5.5
+      expected_fpr: 0.029508
+      expected_recall: 0.288
     - name: aggressive
-      tau: 0.885
-      expected_fpr: 0.045902
-      expected_recall: 0.096
+      tau: 5.2
+      expected_fpr: 0.042623
+      expected_recall: 0.352
 calibration:
-  model: BAAI/bge-small-zh-v1.5
+  generated_at: '2026-06-12T16:35:15.884854+00:00'
   pairs: data/calibration/semcache_pairs.jsonl
   pair_count: 555
   positives: 250
   negatives: 305
   dataset_sha256: 9a8bbeb93e2fb1d942b15f922aa95bdeb81ebaf87c23b35d9101e13826458abd
-  generated_at: '2026-06-12T14:35:56.689964+00:00'
+  embedding_model: BAAI/bge-small-zh-v1.5
+  reranker_model: BAAI/bge-reranker-base
+  recall_top_k: 3
+  target_recall: 0.95
   max_false_hit: 0.01
-  tau: 0.955
-  hit_rate: 0.016
-  false_hit_rate: 0.003279
+  recall_threshold: 0.654424
+  selected_rerank_tau: 6.8
+  selected_recall: 0.088
+  selected_fpr: 0.009836

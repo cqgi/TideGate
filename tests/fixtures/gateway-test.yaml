@@ -87,19 +87,22 @@ policies:
 cache:
   l1: { ttl_s: 60, ttl_jitter_ratio: 0.0, max_value_bytes: 262144 }
   l2:
-    similarity_threshold: 0.86
+    similarity_threshold: 6.8
     operating_points:
-      - { name: conservative, tau: 0.955, expected_fpr: 0.003279, expected_recall: 0.016 }
-      - { name: balanced, tau: 0.925, expected_fpr: 0.019672, expected_recall: 0.028 }
-      - { name: aggressive, tau: 0.885, expected_fpr: 0.045902, expected_recall: 0.096 }
+      - { name: conservative, tau: 6.8, expected_fpr: 0.009836, expected_recall: 0.088 }
+      - { name: balanced, tau: 5.5, expected_fpr: 0.029508, expected_recall: 0.288 }
+      - { name: aggressive, tau: 5.2, expected_fpr: 0.042623, expected_recall: 0.352 }
+    recall_top_k: 3
+    recall_threshold: 0.654424
     stale_threshold_delta: 0.03
     max_temperature: 0.3
     index_capacity: 10000
     embedding_model: BAAI/bge-small-zh-v1.5
+    reranker_model: BAAI/bge-reranker-base
     embed_pool_workers: 1
     hf_endpoint: ""
     model_cache_dir: .cache/huggingface
-    query_timeout_ms: 50
+    query_timeout_ms: 1000
     store_timeout_ms: 500
     capacity_sweep_interval_s: 60
   volatile_intent_patterns: ["今天", "现在", "最新", "几点", "股价", "天气"]
@@ -128,5 +131,5 @@ tenants:
     policy: default
     cache: { l1: true, l2: false, l2_operating_point: conservative }
 
-settlement: { batch_size: 100, batch_interval_ms: 200, queue_max: 10000 }
+settlement: { batch_size: 100, batch_interval_ms: 200, queue_max: 10000, drain_timeout_s: 10.0 }
 otel: { exporter: none, endpoint: null }

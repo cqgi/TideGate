@@ -151,16 +151,19 @@ class L2CacheConfig(FrozenModel):
     similarity_threshold: float = 0.92
     operating_points: tuple[L2OperatingPointConfig, ...] = Field(
         default_factory=tuple,
-        description="Tenant-selectable calibrated semantic cache thresholds",
+        description="Tenant-selectable calibrated reranker thresholds",
     )
+    recall_top_k: int = Field(default=3, description="HNSW recall candidates before rerank")
+    recall_threshold: float = Field(default=0.78, description="Bi-encoder recall threshold")
     stale_threshold_delta: float = 0.03
     max_temperature: float = 0.3
     index_capacity: int = 100000
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    reranker_model: str = "BAAI/bge-reranker-base"
     embed_pool_workers: int = 2
     hf_endpoint: str = Field(default="", description="Optional HuggingFace endpoint mirror")
     model_cache_dir: str = Field(default=".cache/huggingface", description="Model cache directory")
-    query_timeout_ms: int = Field(default=50, description="L2 lookup timeout budget")
+    query_timeout_ms: int = Field(default=1000, description="L2 lookup timeout budget")
     store_timeout_ms: int = Field(default=500, description="L2 semantic store timeout budget")
     capacity_sweep_interval_s: float = Field(
         default=60.0,
@@ -186,6 +189,7 @@ class SettlementConfig(FrozenModel):
     batch_size: int = 100
     batch_interval_ms: int = 200
     queue_max: int = 10000
+    drain_timeout_s: float = 10.0
 
 
 class OTelConfig(FrozenModel):

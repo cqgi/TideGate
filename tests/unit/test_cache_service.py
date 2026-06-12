@@ -6,9 +6,11 @@ from typing import Any
 import pytest
 import redis
 
-from tidegate.cache.l2 import L2Cache, capacity_sweep_loop
+from tidegate.cache.keys import exact_key
+from tidegate.cache.l2 import L2Cache, SemanticHit, capacity_sweep_loop
+from tidegate.cache.normalize import semantic_text
 from tidegate.cache.service import CacheService
-from tidegate.config.loader import load_config
+from tidegate.config.loader import load_config, load_config_dict
 from tidegate.config.models import GatewayConfig
 from tidegate.core.models import ChatMessage, UnifiedRequest, UnifiedResponse, Usage
 from tidegate.obs.metrics import Metrics
@@ -87,6 +89,48 @@ async def test_l2_capacity_sweep_survives_redis_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_l2_rerank_threshold_selects_best_candidate() -> None:
+    """SPEC-F-2."""
+    base = load_config("tests/fixtures/gateway-test.yaml")
+    raw = base.model_dump()
+    raw["cache"]["l2"]["recall_threshold"] = 0.70
+    raw["cache"]["l2"]["recall_top_k"] = 3
+    raw["cache"]["l2"]["operating_points"] = [
+        {"name": "balanced", "tau": 0.60, "expected_fpr": 0.01, "expected_recall": 0.90}
+    ]
+    settings = load_config_dict(raw)
+    tenant = settings.tenants[0].model_copy(
+        update={
+            "cache": settings.tenants[0].cache.model_copy(
+                update={"l2": True, "l2_operating_point": "balanced"}
+            )
+        }
+    )
+    req = _req()
+    semantic_key = exact_key(tenant.id, "semantic-candidate")
+    l1 = _MemoryL1({semantic_key: _resp(content="reranked")})
+    l2 = _CandidateL2(
+        [
+            SemanticHit("low", semantic_key, score=0.91, text="无关问题"),
+            SemanticHit("high", semantic_key, score=0.80, text=semantic_text(req)),
+        ]
+    )
+    service = CacheService(
+        l1,
+        l2,
+        _RerankEmbedding([0.10, 0.90]),
+        Metrics.create(),
+    )
+
+    hit = await service.lookup(req, tenant, settings)
+
+    assert hit is not None
+    assert hit.response.content == "reranked"
+    assert hit.semcache_entry_id == "high"
+    assert l2.marked == ["high"]
+
+
+@pytest.mark.asyncio
 async def test_l1_lookup_redis_error_is_cache_miss() -> None:
     """SPEC-M4-3."""
     settings = load_config("tests/fixtures/gateway-test.yaml")
@@ -115,14 +159,21 @@ async def test_l1_store_redis_error_does_not_escape() -> None:
 
 
 class _MissingL1:
-    async def get(self, key: str) -> None:
+    async def get(self, key: str) -> UnifiedResponse | None:
         del key
+        return None
 
     async def set(self, key: str, response: UnifiedResponse, settings: GatewayConfig) -> None:
         del key, response, settings
 
 
 class _MemoryL1(_MissingL1):
+    def __init__(self, values: dict[str, UnifiedResponse] | None = None) -> None:
+        self._values = values or {}
+
+    async def get(self, key: str) -> UnifiedResponse | None:
+        return self._values.get(key)
+
     async def set(self, key: str, response: UnifiedResponse, settings: GatewayConfig) -> None:
         del key, response, settings
 
@@ -141,13 +192,35 @@ class _MissingL2(L2Cache):
     def __init__(self) -> None:
         self.stores = 0
 
-    async def lookup(self, **kwargs: Any) -> None:
+    async def lookup(self, **kwargs: Any) -> list[SemanticHit]:
         del kwargs
+        return []
 
     async def store(self, **kwargs: Any) -> str:
         del kwargs
         self.stores += 1
         return "entry"
+
+    async def mark_hit(self, entry_id: str) -> None:
+        del entry_id
+
+
+class _CandidateL2(_MissingL2):
+    def __init__(self, hits: list[SemanticHit]) -> None:
+        self._hits = hits
+        self.marked: list[str] = []
+        self.deleted: list[str] = []
+        self.stores = 0
+
+    async def lookup(self, **kwargs: Any) -> list[SemanticHit]:
+        del kwargs
+        return self._hits
+
+    async def mark_hit(self, entry_id: str) -> None:
+        self.marked.append(entry_id)
+
+    async def delete(self, entry_id: str) -> None:
+        self.deleted.append(entry_id)
 
 
 class _FailingCapacityL2(L2Cache):
@@ -165,6 +238,23 @@ class _SlowEmbedding:
         await asyncio.sleep(0.01)
         return [[0.0] * 512]
 
+    async def rerank(self, pairs: list[tuple[str, str]]) -> list[float]:
+        del pairs
+        await asyncio.sleep(0.01)
+        return []
+
+
+class _RerankEmbedding:
+    def __init__(self, scores: list[float]) -> None:
+        self._scores = scores
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] * 512 for _ in texts]
+
+    async def rerank(self, pairs: list[tuple[str, str]]) -> list[float]:
+        assert len(pairs) == len(self._scores)
+        return self._scores
+
 
 def _req() -> UnifiedRequest:
     return UnifiedRequest(
@@ -178,9 +268,9 @@ def _req() -> UnifiedRequest:
     )
 
 
-def _resp() -> UnifiedResponse:
+def _resp(content: str = "ok") -> UnifiedResponse:
     return UnifiedResponse(
-        content="ok",
+        content=content,
         finish_reason="stop",
         model="mock",
         usage=Usage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
