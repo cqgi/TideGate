@@ -24,10 +24,16 @@ def build_providers(config: GatewayConfig) -> dict[str, Provider]:
 
     providers: dict[str, Provider] = {}
     for name, provider_config in config.providers.items():
-        factory = _REGISTRY[provider_config.type]
         # SPEC-M1-3: each provider instance owns its httpx connection pool.
-        providers[name] = factory(name, provider_config)
+        providers[name] = build_provider(name, provider_config)
     return providers
+
+
+def build_provider(name: str, provider_config: ProviderConfig) -> Provider:
+    from tidegate.providers import openai_compat  # noqa: F401
+
+    factory = _REGISTRY[provider_config.type]
+    return factory(name, provider_config)
 
 
 def api_key_from_env(env_name: str) -> str:
