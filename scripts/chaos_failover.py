@@ -60,11 +60,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     during_ok += 1
             route = response.headers.get("X-TideGate-Route", "none")
             routes[route] = routes.get(route, 0) + 1
-            if (
-                injected_at is not None
-                and recovered_at is None
-                and route.startswith("mock-b/")
-            ):
+            if injected_at is not None and recovered_at is None and route.startswith("mock-b/"):
                 consecutive_b += 1
                 if consecutive_b >= 10 and first_b_streak_at is None:
                     first_b_streak_at = time.monotonic()

@@ -35,7 +35,7 @@ from tidegate.core.models import (
 from tidegate.providers.base import Provider
 from tidegate.quota.service import QuotaReservation, QuotaService
 from tidegate.routing.ladder import RouteLevel, RoutingLadder
-from tidegate.routing.selector import NoAvailableDeployment, P2CSelector, pick
+from tidegate.routing.selector import NoAvailableDeployment, P2CSelector
 from tidegate.routing.stats import RoutingState
 
 router = APIRouter()
@@ -276,9 +276,6 @@ async def _stream_with_retries(
             try:
                 routing_state.record_start(deployment, now_s=time.monotonic())
             except GatewayError as exc:
-                if quota_settle is not None:
-                    await quota_settle.settle_once(None, 0)
-                    quota_settle = None
                 last_error = exc
                 continue
             upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
@@ -464,13 +461,15 @@ def _pick_attempt(
 ) -> _PickedAttempt:
     selector: P2CSelector | None = getattr(request.app.state, "selector", None)
     if selector is None:
-        deployment = pick(level.group, exclude)
-    else:
-        deployment = selector.pick(
-            level.group,
-            exclude,
-            now_s=asyncio.get_running_loop().time(),
+        selector = P2CSelector(
+            request.app.state.config_holder.current,
+            _routing_state(request),
         )
+    deployment = selector.pick(
+        level.group,
+        exclude,
+        now_s=asyncio.get_running_loop().time(),
+    )
     provider = request.app.state.provider_manager.providers[deployment.provider]
     return _PickedAttempt(deployment, provider, level.model_group_name, level.degraded)
 

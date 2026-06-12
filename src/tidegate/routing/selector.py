@@ -93,21 +93,3 @@ class P2CSelector:
         if field == "price":
             return deployment.price_per_1k_input_usd + deployment.price_per_1k_output_usd
         raise ValueError(field)
-
-
-def pick(group: ModelGroupConfig, exclude: set[tuple[str, str]]) -> DeploymentConfig:
-    candidates = [
-        deployment
-        for deployment in group.deployments
-        if (deployment.provider, deployment.upstream_model) not in exclude and deployment.weight > 0
-    ]
-    if not candidates:
-        raise NoAvailableDeployment()
-    total = sum(deployment.weight for deployment in candidates)
-    target = random.uniform(0, total)
-    cursor = 0.0
-    for deployment in candidates:
-        cursor += deployment.weight
-        if cursor >= target:
-            return deployment
-    return candidates[-1]

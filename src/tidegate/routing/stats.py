@@ -12,6 +12,8 @@ from tidegate.routing.breaker import BreakerState, CircuitBreaker
 class DeploymentStats:
     ewma_ttft_s: float = 0.0
     ewma_error_rate: float = 0.0
+    ttft_initialized: bool = False
+    error_rate_initialized: bool = False
     inflight: int = 0
     cooldown_until_s: float = 0.0
 
@@ -62,10 +64,22 @@ class RoutingState:
         stats.inflight = max(0, stats.inflight - 1)
         alpha = self._settings.routing.ewma_alpha
         if ttft_s is not None:
-            stats.ewma_ttft_s = _ewma(stats.ewma_ttft_s, ttft_s, alpha)
+            stats.ewma_ttft_s = _ewma(
+                stats.ewma_ttft_s,
+                ttft_s,
+                alpha,
+                initialized=stats.ttft_initialized,
+            )
+            stats.ttft_initialized = True
             if ttft_s > self._settings.routing.slow_call_ttft_slo_s:
                 success = False
-        stats.ewma_error_rate = _ewma(stats.ewma_error_rate, 0.0 if success else 1.0, alpha)
+        stats.ewma_error_rate = _ewma(
+            stats.ewma_error_rate,
+            0.0 if success else 1.0,
+            alpha,
+            initialized=stats.error_rate_initialized,
+        )
+        stats.error_rate_initialized = True
         breaker = self.breaker_for(deployment)
         before = breaker.state
         after = breaker.record(success=success, now_s=now_s)
@@ -134,8 +148,8 @@ def deployment_key(deployment: DeploymentConfig) -> tuple[str, str]:
     return deployment.provider, deployment.upstream_model
 
 
-def _ewma(current: float, sample: float, alpha: float) -> float:
-    if current == 0.0:
+def _ewma(current: float, sample: float, alpha: float, *, initialized: bool) -> float:
+    if not initialized:
         return sample
     return alpha * sample + (1 - alpha) * current
 

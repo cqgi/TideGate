@@ -40,6 +40,21 @@ def test_rate_limit_cools_down_without_opening_breaker() -> None:
     assert stats.cooldown_until_s == 12.0
 
 
+def test_error_rate_ewma_bootstrap_distinguishes_initialized_zero() -> None:
+    """REWORK-M3-1."""
+    settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
+    state = RoutingState(settings)
+    deployment = settings.model_groups["chat-large"].deployments[0]
+    alpha = settings.routing.ewma_alpha
+
+    state.record_start(deployment, now_s=0.0)
+    state.record_finish(deployment, success=True, ttft_s=0.01, now_s=0.0)
+    state.record_start(deployment, now_s=0.0)
+    state.record_finish(deployment, success=False, ttft_s=0.01, now_s=0.0)
+
+    assert state.stats_for(deployment).ewma_error_rate == pytest.approx(alpha)
+
+
 @pytest.mark.asyncio
 async def test_report_once_writes_aggregate_keys() -> None:
     """SPEC-M3-5."""
