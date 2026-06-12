@@ -25,6 +25,7 @@ class ServerConfig(FrozenModel):
     config_reload_backoff_max_s: float = Field(
         default=60.0, description="Maximum Redis hot-reload reconnect backoff"
     )
+    cpu_pool_workers: int = Field(default=2, description="Shared CPU process pool workers")
 
 
 class TimeoutConfig(FrozenModel):
@@ -168,6 +169,7 @@ class SweeperConfig(FrozenModel):
     interval_s: int = 10
     batch_limit: int = 100
     reservation_ttl_s: int = 600
+    settle_timeout_s: float = 1.0
 
 
 class GatewayConfig(FrozenModel):

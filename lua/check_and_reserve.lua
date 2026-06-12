@@ -16,6 +16,7 @@ local tpm_cost = tonumber(ARGV[8])
 local conc_cap = tonumber(ARGV[9])
 local budget_cost_micro = tonumber(ARGV[10])
 local budget_init_micro = tonumber(ARGV[11])
+local month = ARGV[12]
 
 local function refill_bucket(key, rate, cap)
   local tokens = tonumber(redis.call("HGET", key, "tokens"))
@@ -24,7 +25,8 @@ local function refill_bucket(key, rate, cap)
     tokens = cap
     ts_ms = now_ms
   else
-    tokens = math.min(cap, tokens + ((now_ms - ts_ms) * rate / 1000))
+    local delta_ms = math.max(0, now_ms - ts_ms)
+    tokens = math.min(cap, tokens + (delta_ms * rate / 1000))
     ts_ms = now_ms
   end
   redis.call("HSET", key, "tokens", tokens, "ts_ms", ts_ms, "cap", cap)
@@ -68,7 +70,7 @@ redis.call(
   "HSET",
   resv_hash,
   request_id,
-  cjson.encode({tpm_est = tpm_cost, budget_est_micro = budget_cost_micro})
+  cjson.encode({tpm_est = tpm_cost, budget_est_micro = budget_cost_micro, month = month})
 )
 
 return {1}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,12 +57,14 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task_registry = TaskRegistry()
         redis_client = redis.from_url(settings.redis.url, decode_responses=False)
+        cpu_pool = ProcessPoolExecutor(max_workers=settings.server.cpu_pool_workers)
         quota_scripts = QuotaScripts(redis_client)
         quota_service = QuotaService(
             redis_client,
             quota_scripts,
-            QuotaEstimator(RedisCorrectionStore(redis_client)),
+            QuotaEstimator(RedisCorrectionStore(redis_client), process_pool=cpu_pool),
             LocalFallbackLimiter(),
+            metrics,
         )
         app.state.config_holder = holder
         app.state.metrics = metrics
@@ -69,6 +72,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         app.state.task_registry = task_registry
         app.state.redis = redis_client
         app.state.quota = quota_service
+        app.state.cpu_pool = cpu_pool
         task_registry.create(
             probe_loop_lag(metrics, settings.server.loop_lag_interval_s),
             name="tidegate-loop-lag",
@@ -95,6 +99,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             await task_registry.drain()
             await provider_manager.close()
             await redis_client.aclose()
+            cpu_pool.shutdown(cancel_futures=True)
 
     app = FastAPI(title="TideGate", lifespan=lifespan)
     app.state.config_holder = holder

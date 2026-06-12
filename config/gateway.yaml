@@ -9,6 +9,7 @@ server:
   provider_pool_drain_s: 60.0
   config_reload_backoff_initial_s: 1.0
   config_reload_backoff_max_s: 60.0
+  cpu_pool_workers: 2
 
 timeouts: { connect_s: 2.0, ttft_s: 10.0, inter_chunk_s: 15.0, total_s: 300.0 }
 
@@ -49,6 +50,8 @@ quota_plans:
     concurrent_streams: 10
     monthly_budget_usd: 10
     fail_mode: closed
+
+sweeper: { interval_s: 10, batch_limit: 100, reservation_ttl_s: 600, settle_timeout_s: 1.0 }
 
 tenants:
   - id: demo
