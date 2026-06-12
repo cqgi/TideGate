@@ -15,6 +15,8 @@ class ServerConfig(FrozenModel):
     auth_cache_size: int = Field(default=1024, description="In-process API key cache capacity")
     auth_cache_ttl_s: float = Field(default=60.0, description="In-process API key cache TTL")
     loop_lag_interval_s: float = Field(default=1.0, description="Loop lag probe interval")
+    config_poll_interval_s: float = Field(default=30.0, description="Config version poll interval")
+    provider_pool_drain_s: float = Field(default=60.0, description="Old provider pool drain delay")
 
 
 class TimeoutConfig(FrozenModel):
@@ -179,15 +181,3 @@ class GatewayConfig(FrozenModel):
 
     def tenant_by_id(self, tenant_id: str) -> TenantConfig | None:
         return next((tenant for tenant in self.tenants if tenant.id == tenant_id), None)
-
-
-class ConfigHolder:
-    def __init__(self, initial: GatewayConfig) -> None:
-        self._current = initial
-
-    @property
-    def current(self) -> GatewayConfig:
-        return self._current
-
-    def replace(self, next_config: GatewayConfig) -> None:
-        self._current = next_config

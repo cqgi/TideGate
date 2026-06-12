@@ -12,7 +12,8 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from tidegate.config.models import ConfigHolder, TenantConfig
+from tidegate.config.holder import ConfigHolder
+from tidegate.config.models import TenantConfig
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.obs.logging import bind_request_id
 
@@ -80,15 +81,19 @@ class AuthMiddleware:
     def __init__(self, app: ASGIApp, config: ConfigHolder) -> None:
         self._app = app
         self._config = config
+        config_auth = config.current.server
         self._cache = _AuthCache(
-            config.current.server.auth_cache_size,
-            config.current.server.auth_cache_ttl_s,
+            config_auth.auth_cache_size,
+            config_auth.auth_cache_ttl_s,
         )
+        self._cache_version = config.version
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["path"] != "/v1/chat/completions":
+        data_paths = {"/v1/chat/completions", "/v1/models"}
+        if scope["type"] != "http" or scope["path"] not in data_paths:
             await self._app(scope, receive, send)
             return
+        self._reset_cache_if_config_changed()
 
         headers = Headers(scope=scope)
         authorization = headers.get("Authorization", "")
@@ -117,6 +122,14 @@ class AuthMiddleware:
         self._cache.put(key_hash, tenant)
         _scope_state(scope)["tenant"] = tenant
         await self._app(scope, receive, send)
+
+    def _reset_cache_if_config_changed(self) -> None:
+        if self._cache_version == self._config.version:
+            return
+        current = self._config.current.server
+        # SPEC-M1-4: tenant reloads invalidate cached auth decisions immediately.
+        self._cache = _AuthCache(current.auth_cache_size, current.auth_cache_ttl_s)
+        self._cache_version = self._config.version
 
     def _find_tenant(self, key_hash: str) -> TenantConfig | None:
         for tenant in self._config.current.tenants:

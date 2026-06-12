@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from tidegate.api.sse import (
     DisconnectAwareStreamingResponse,
     StreamAccounting,
+    error_chunk,
     heartbeat_event,
     log_stream_access,
     sse_event,
@@ -25,6 +26,7 @@ from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import ChatCompletionIn, UnifiedDelta, UnifiedRequest, UnifiedResponse
 from tidegate.providers.base import Provider
+from tidegate.routing.selector import pick
 
 router = APIRouter()
 
@@ -38,6 +40,16 @@ async def healthz() -> dict[str, str]:
 async def metrics(request: Request) -> Response:
     body, content_type = request.app.state.metrics.render()
     return Response(body, media_type=content_type)
+
+
+@router.get("/v1/models")
+async def list_models(request: Request) -> JSONResponse:
+    settings: GatewayConfig = request.app.state.config_holder.current
+    models = [
+        {"id": name, "object": "model", "created": 0, "owned_by": "tidegate"}
+        for name in sorted(settings.model_groups)
+    ]
+    return JSONResponse({"object": "list", "data": models})
 
 
 @router.post("/v1/chat/completions", response_model=None)
@@ -62,41 +74,38 @@ async def chat_completions(request: Request) -> Response:
             http_status=422,
         ) from exc
 
-    deployment = _first_deployment(settings, incoming.model)
+    group = settings.model_groups.get(incoming.model)
+    if group is None:
+        raise GatewayError("unknown model", ErrorCategory.CLIENT_ERROR, http_status=404)
     tenant: TenantConfig = request.state.tenant
     request_id: str = request.state.request_id
-    provider: Provider = request.app.state.providers[deployment.provider]
     deadline = _deadline(settings)
     unified = _unified_request(request, incoming, raw_body, tenant, request_id)
     # REWORK-M0-1: gateway overhead is request receipt through upstream dispatch.
     request.app.state.metrics.overhead.observe(time.monotonic() - request_started)
-    route_header = f"{deployment.provider}/{deployment.upstream_model}"
-
     if incoming.stream:
-        # SPEC-M0-5: M0 routes to the first deployment and transparently proxies SSE.
-        upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
         return DisconnectAwareStreamingResponse(
-            _render_stream(
+            _stream_with_retries(
                 request=request,
-                upstream=upstream,
+                group=group,
+                unified=unified,
+                deadline=deadline,
                 incoming=incoming,
-                provider_name=deployment.provider,
-                route_header=route_header,
             ),
             media_type="text/event-stream",
             headers={
                 "X-TideGate-Cache": "miss",
-                "X-TideGate-Route": route_header,
             },
         )
 
     started = time.monotonic()
-    try:
-        # SPEC-M0-5: non-streaming requests use the same first-deployment proxy path.
-        response = await provider.chat(unified, deployment.upstream_model, deadline)
-    except GatewayError:
-        request.app.state.metrics.requests.labels(tenant.id, incoming.model, "error").inc()
-        raise
+    response, route_header = await _call_non_stream_with_retries(
+        request=request,
+        group=group,
+        unified=unified,
+        deadline=deadline,
+        model=incoming.model,
+    )
     duration = time.monotonic() - started
     request.app.state.metrics.requests.labels(tenant.id, incoming.model, "ok").inc()
     structlog.get_logger().info(
@@ -180,11 +189,101 @@ async def _render_stream(
         )
 
 
-def _first_deployment(settings: GatewayConfig, model: str) -> Any:
-    group = settings.model_groups.get(model)
-    if group is None or not group.deployments:
-        raise GatewayError("unknown model", ErrorCategory.CLIENT_ERROR, http_status=404)
-    return group.deployments[0]
+async def _stream_with_retries(
+    *,
+    request: Request,
+    group: Any,
+    unified: UnifiedRequest,
+    deadline: Deadline,
+    incoming: ChatCompletionIn,
+) -> AsyncIterator[bytes]:
+    settings: GatewayConfig = request.app.state.config_holder.current
+    exclude: set[tuple[str, str]] = set()
+    attempts = settings.routing.max_attempts_before_first_byte
+    last_error: GatewayError | None = None
+    for _ in range(attempts):
+        deployment, provider = _pick_attempt(request, group, exclude)
+        exclude.add((deployment.provider, deployment.upstream_model))
+        route_header = f"{deployment.provider}/{deployment.upstream_model}"
+        upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
+        sent_any = False
+        try:
+            async for chunk in _render_stream(
+                request=request,
+                upstream=upstream,
+                incoming=incoming,
+                provider_name=deployment.provider,
+                route_header=route_header,
+            ):
+                sent_any = True
+                yield chunk
+            return
+        except GatewayError as exc:
+            last_error = exc
+            if sent_any:
+                # SPEC-M1-1: stream-in-flight failures finish with error chunk + DONE.
+                async for chunk in error_chunk(unified.request_id, incoming.model):
+                    yield chunk
+                return
+            if exc.category not in {
+                ErrorCategory.RETRYABLE_UPSTREAM,
+                ErrorCategory.RATE_LIMITED_UPSTREAM,
+                ErrorCategory.TIMEOUT_TTFT,
+            }:
+                raise
+            request.app.state.metrics.retry.labels(reason=exc.category.value).inc()
+            request.app.state.metrics.upstream_aborted.labels(
+                provider=deployment.provider, reason="timeout"
+            ).inc()
+            aclose = getattr(upstream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+            continue
+    if last_error is not None:
+        raise last_error
+    raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
+
+
+async def _call_non_stream_with_retries(
+    *,
+    request: Request,
+    group: Any,
+    unified: UnifiedRequest,
+    deadline: Deadline,
+    model: str,
+) -> tuple[UnifiedResponse, str]:
+    settings: GatewayConfig = request.app.state.config_holder.current
+    exclude: set[tuple[str, str]] = set()
+    last_error: GatewayError | None = None
+    for _ in range(settings.routing.max_attempts_before_first_byte):
+        deployment, provider = _pick_attempt(request, group, exclude)
+        exclude.add((deployment.provider, deployment.upstream_model))
+        route_header = f"{deployment.provider}/{deployment.upstream_model}"
+        try:
+            response = await provider.chat(unified, deployment.upstream_model, deadline)
+            return response, route_header
+        except GatewayError as exc:
+            last_error = exc
+            if exc.category not in {
+                ErrorCategory.RETRYABLE_UPSTREAM,
+                ErrorCategory.RATE_LIMITED_UPSTREAM,
+                ErrorCategory.TIMEOUT_TTFT,
+            }:
+                request.app.state.metrics.requests.labels(unified.tenant_id, model, "error").inc()
+                raise
+            request.app.state.metrics.retry.labels(reason=exc.category.value).inc()
+    request.app.state.metrics.requests.labels(unified.tenant_id, model, "error").inc()
+    if last_error is not None:
+        raise last_error
+    raise GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
+
+
+def _pick_attempt(
+    request: Request, group: Any, exclude: set[tuple[str, str]]
+) -> tuple[Any, Provider]:
+    deployment = pick(group, exclude)
+    provider = request.app.state.provider_manager.providers[deployment.provider]
+    return deployment, provider
 
 
 def _deadline(settings: GatewayConfig) -> Deadline:

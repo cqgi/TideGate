@@ -10,6 +10,8 @@ from tidegate.core.models import UnifiedDelta, UnifiedRequest, UnifiedResponse
 class Provider(Protocol):
     name: str
 
+    async def aclose(self) -> None: ...
+
     def stream_chat(
         self,
         req: UnifiedRequest,

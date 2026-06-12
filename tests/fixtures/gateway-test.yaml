@@ -5,6 +5,8 @@ server:
   auth_cache_size: 1024
   auth_cache_ttl_s: 60
   loop_lag_interval_s: 1.0
+  config_poll_interval_s: 30.0
+  provider_pool_drain_s: 0.1
 
 timeouts: { connect_s: 2.0, ttft_s: 10.0, inter_chunk_s: 15.0, total_s: 300.0 }
 
@@ -16,6 +18,11 @@ providers:
     base_url: http://127.0.0.1:9001/v1
     api_key_env: MOCK_A_KEY
     max_connections: 200
+  mock-b:
+    type: openai_compatible
+    base_url: http://127.0.0.1:9002/v1
+    api_key_env: MOCK_B_KEY
+    max_connections: 200
 
 model_groups:
   chat-large:
@@ -25,6 +32,12 @@ model_groups:
         weight: 1
         price_per_1k_input_usd: 0.0030
         price_per_1k_output_usd: 0.0060
+        supports_logprobs: true
+      - provider: mock-b
+        upstream_model: mock-gpt-large
+        weight: 1
+        price_per_1k_input_usd: 0.0025
+        price_per_1k_output_usd: 0.0050
         supports_logprobs: true
 
 tenants:

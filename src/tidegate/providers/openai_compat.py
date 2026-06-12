@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -19,11 +20,16 @@ _MOCK_DIRECTIVE_BODY_KEY = "__tidegate_mock_directive"
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, name: str, config: ProviderConfig, client: httpx.AsyncClient) -> None:
+    def __init__(self, name: str, config: ProviderConfig) -> None:
         self.name = name
         self._config = config
-        self._client = client
+        limits = httpx.Limits(max_connections=config.max_connections)
+        # SPEC-M1-3: provider instance has an independent pool and ignores proxy env for localhost.
+        self._client = httpx.AsyncClient(limits=limits, trust_env=False)
         self._api_key = api_key_from_env(config.api_key_env)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     async def chat(
         self,
@@ -35,12 +41,13 @@ class OpenAICompatibleProvider:
         body, headers = self._upstream_payload(req, upstream_model)
         body["stream"] = False
         try:
-            response = await self._client.post(
-                f"{self._config.base_url}/chat/completions",
-                json=body,
-                headers=headers,
-                timeout=_timeout(deadline),
-            )
+            async with asyncio.timeout_at(deadline.total_deadline):
+                response = await self._client.post(
+                    f"{self._config.base_url}/chat/completions",
+                    json=body,
+                    headers=headers,
+                    timeout=_timeout(deadline),
+                )
         except httpx.ConnectTimeout as exc:
             # REWORK-M0-3: connect timeout is a retryable connection failure.
             raise GatewayError(
@@ -50,8 +57,14 @@ class OpenAICompatibleProvider:
             raise GatewayError(
                 "upstream connection failed", ErrorCategory.RETRYABLE_UPSTREAM
             ) from exc
+        except httpx.RemoteProtocolError as exc:
+            raise GatewayError("upstream protocol error", ErrorCategory.RETRYABLE_UPSTREAM) from exc
         except httpx.TimeoutException as exc:
             raise GatewayError("upstream timed out", ErrorCategory.TIMEOUT_STALL) from exc
+        except TimeoutError as exc:
+            raise GatewayError(
+                "upstream total deadline exceeded", ErrorCategory.TIMEOUT_TOTAL
+            ) from exc
         _raise_for_status(response)
         payload = response.json()
         return _parse_non_stream_response(payload)
@@ -66,17 +79,42 @@ class OpenAICompatibleProvider:
         body, headers = self._upstream_payload(req, upstream_model)
         body["stream"] = True
         try:
-            async with self._client.stream(
-                "POST",
-                f"{self._config.base_url}/chat/completions",
-                json=body,
-                headers=headers,
-                timeout=_timeout(deadline),
-            ) as response:
-                _raise_for_status(response)
-                async for line in response.aiter_lines():
-                    delta = _parse_sse_line(line)
-                    if delta is not None:
+            async with asyncio.timeout_at(deadline.total_deadline):
+                async with self._client.stream(
+                    "POST",
+                    f"{self._config.base_url}/chat/completions",
+                    json=body,
+                    headers=headers,
+                    timeout=_timeout(deadline),
+                ) as response:
+                    _raise_for_status(response)
+                    first_content = False
+                    line_iter = response.aiter_lines()
+                    while True:
+                        try:
+                            if first_content:
+                                line = await anext(line_iter)
+                            else:
+                                # SPEC-M1-1: TTFT is request dispatch until first content delta.
+                                async with asyncio.timeout(deadline.ttft_s):
+                                    line = await anext(line_iter)
+                        except StopAsyncIteration:
+                            return
+                        except TimeoutError as exc:
+                            if deadline.remaining() <= 0:
+                                raise GatewayError(
+                                    "upstream total deadline exceeded",
+                                    ErrorCategory.TIMEOUT_TOTAL,
+                                ) from exc
+                            raise GatewayError(
+                                "upstream time to first token exceeded",
+                                ErrorCategory.TIMEOUT_TTFT,
+                            ) from exc
+                        delta = _parse_sse_line(line)
+                        if delta is None:
+                            continue
+                        if delta.content:
+                            first_content = True
                         yield delta
         except httpx.ConnectTimeout as exc:
             # REWORK-M0-3: connect timeout is a retryable connection failure.
@@ -87,8 +125,14 @@ class OpenAICompatibleProvider:
             raise GatewayError(
                 "upstream connection failed", ErrorCategory.RETRYABLE_UPSTREAM
             ) from exc
+        except httpx.RemoteProtocolError as exc:
+            raise GatewayError("upstream protocol error", ErrorCategory.RETRYABLE_UPSTREAM) from exc
         except httpx.TimeoutException as exc:
             raise GatewayError("upstream stream stalled", ErrorCategory.TIMEOUT_STALL) from exc
+        except TimeoutError as exc:
+            raise GatewayError(
+                "upstream total deadline exceeded", ErrorCategory.TIMEOUT_TOTAL
+            ) from exc
 
     def _upstream_payload(
         self,
@@ -199,6 +243,5 @@ def _parse_sse_line(line: str) -> UnifiedDelta | None:
 def build_openai_compatible(
     name: str,
     config: ProviderConfig,
-    client: httpx.AsyncClient,
 ) -> OpenAICompatibleProvider:
-    return OpenAICompatibleProvider(name, config, client)
+    return OpenAICompatibleProvider(name, config)

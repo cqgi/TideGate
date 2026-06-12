@@ -1,89 +1,16 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import struct
 import subprocess
-import sys
 import time
-from collections.abc import Iterator
 
 import httpx
 import pytest
 from openai import OpenAI
 
-BASE_URL = "http://127.0.0.1:8000"
-MOCK_URL = "http://127.0.0.1:9001"
-API_KEY = "<demo key>"
-
-
-def _wait_ready(url: str, proc: subprocess.Popen[str]) -> None:
-    deadline = time.monotonic() + 10
-    with httpx.Client(timeout=0.5, trust_env=False) as client:
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                _, stderr = proc.communicate()
-                raise RuntimeError(f"service exited early: {stderr}")
-            try:
-                response = client.get(url)
-                if response.status_code < 500:
-                    return
-            except httpx.HTTPError:
-                time.sleep(0.1)
-        raise RuntimeError(f"service did not become ready: {url}")
-
-
-@pytest.fixture(scope="session")
-def mock_provider_proc() -> Iterator[subprocess.Popen[str]]:
-    env = {
-        **os.environ,
-        "PYTHONPATH": f"{os.getcwd()}/src:{os.getcwd()}",
-    }
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "mock_provider", "--host", "127.0.0.1", "--port", "9001"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    _wait_ready(f"{MOCK_URL}/__stats", proc)
-    yield proc
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-
-@pytest.fixture(scope="session")
-def gateway_proc(mock_provider_proc: subprocess.Popen[str]) -> Iterator[subprocess.Popen[str]]:
-    del mock_provider_proc
-    env = {
-        **os.environ,
-        "TIDEGATE_ADMIN_TOKEN": "dev-admin",
-        "MOCK_A_KEY": "mock-key",
-        "PYTHONPATH": f"{os.getcwd()}/src:{os.getcwd()}",
-    }
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "tidegate", "--config", "tests/fixtures/gateway-test.yaml"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-    )
-    _wait_ready(f"{BASE_URL}/healthz", proc)
-    yield proc
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-
-
-def _reset_mock() -> None:
-    with httpx.Client(timeout=2, trust_env=False) as client:
-        client.post(f"{MOCK_URL}/__reset")
+from tests.integration.conftest import API_KEY, BASE_URL, MOCK_A_URL, MOCK_B_URL, reset_mock
 
 
 @pytest.mark.integration
@@ -117,7 +44,8 @@ def test_stream_and_non_stream_match(gateway_proc: subprocess.Popen[str]) -> Non
 def test_disconnect_aborts_upstream(gateway_proc: subprocess.Popen[str]) -> None:
     """SPEC-M0-5."""
     del gateway_proc
-    _reset_mock()
+    reset_mock(MOCK_A_URL)
+    reset_mock(MOCK_B_URL)
     directive = {"ttft_ms": 10, "tpot_ms": 80, "output_tokens": 50}
     body = json.dumps(
         {
@@ -149,8 +77,9 @@ def test_disconnect_aborts_upstream(gateway_proc: subprocess.Popen[str]) -> None
     deadline = time.monotonic() + 2
     with httpx.Client(timeout=2, trust_env=False) as client:
         while time.monotonic() < deadline:
-            stats = client.get(f"{MOCK_URL}/__stats").json()
-            if stats["aborted"] >= 1:
+            stats_a = client.get(f"{MOCK_A_URL}/__stats").json()
+            stats_b = client.get(f"{MOCK_B_URL}/__stats").json()
+            if stats_a["aborted"] + stats_b["aborted"] >= 1:
                 return
             time.sleep(0.1)
     raise AssertionError("mock provider did not record upstream abort")

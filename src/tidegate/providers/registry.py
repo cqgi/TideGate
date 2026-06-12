@@ -3,12 +3,10 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 
-import httpx
-
 from tidegate.config.models import GatewayConfig, ProviderConfig
 from tidegate.providers.base import Provider
 
-ProviderFactory = Callable[[str, ProviderConfig, httpx.AsyncClient], Provider]
+ProviderFactory = Callable[[str, ProviderConfig], Provider]
 
 _REGISTRY: dict[str, ProviderFactory] = {}
 
@@ -21,13 +19,14 @@ def register_provider(provider_type: str) -> Callable[[ProviderFactory], Provide
     return decorator
 
 
-def build_providers(config: GatewayConfig, client: httpx.AsyncClient) -> dict[str, Provider]:
+def build_providers(config: GatewayConfig) -> dict[str, Provider]:
     from tidegate.providers import openai_compat  # noqa: F401
 
     providers: dict[str, Provider] = {}
     for name, provider_config in config.providers.items():
         factory = _REGISTRY[provider_config.type]
-        providers[name] = factory(name, provider_config, client)
+        # SPEC-M1-3: each provider instance owns its httpx connection pool.
+        providers[name] = factory(name, provider_config)
     return providers
 
 

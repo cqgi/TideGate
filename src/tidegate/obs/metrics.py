@@ -19,6 +19,7 @@ class Metrics:
     ttft: Histogram
     overhead: Histogram
     upstream_aborted: Counter
+    retry: Counter
     loop_lag: Gauge
 
     @classmethod
@@ -51,6 +52,12 @@ class Metrics:
                 "Upstream streams aborted by the gateway",
                 # REWORK-M0-1: contract labels are provider and reason.
                 ("provider", "reason"),
+                registry=registry,
+            ),
+            retry=Counter(
+                "tidegate_retry",
+                "Gateway retry attempts",
+                ("reason",),
                 registry=registry,
             ),
             loop_lag=Gauge(
