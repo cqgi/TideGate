@@ -20,7 +20,7 @@ from tidegate.config.loader import load_config
 from tidegate.config.models import DeploymentConfig, GatewayConfig
 from tidegate.core.models import ChatMessage, UnifiedRequest, Usage
 from tidegate.quota.estimator import Estimate, QuotaEstimator, RedisCorrectionStore
-from tidegate.quota.keys import conc_key, reservation_zset_key
+from tidegate.quota.keys import conc_key, reservation_zset_key, rpm_key
 from tidegate.quota.scripts import QuotaScripts
 from tidegate.quota.service import QuotaService
 
@@ -151,6 +151,61 @@ def test_stream_disconnect_releases_concurrency(
         _wait_for_quota_release()
     finally:
         _stop_gateway(proc)
+
+
+@pytest.mark.integration
+def test_stream_retry_charges_single_rpm(
+    mock_a_proc: subprocess.Popen[str],
+    mock_b_proc: subprocess.Popen[str],
+    tmp_path: Path,
+) -> None:
+    """REWORK-M2-1."""
+    del mock_a_proc, mock_b_proc
+    reset_mock(MOCK_A_URL)
+    port = 8028
+    config_path = _quota_config(
+        tmp_path,
+        port=port,
+        single_provider=False,
+        extra_updates={
+            "timeouts": {"connect_s": 0.1, "ttft_s": 1.0, "inter_chunk_s": 15.0, "total_s": 5.0},
+            "routing": {"max_attempts_before_first_byte": 2},
+            "providers": {
+                "mock-a": {
+                    "type": "openai_compatible",
+                    "base_url": "http://127.0.0.1:9/v1",
+                    "api_key_env": "MOCK_A_KEY",
+                    "max_connections": 200,
+                }
+            },
+        },
+    )
+    proc = _start_gateway(config_path, port)
+    try:
+        with (
+            httpx.Client(timeout=5, trust_env=False) as client,
+            client.stream(
+                "POST",
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                },
+                json={
+                    "model": "chat-large",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            ) as response,
+        ):
+            lines = [line for line in response.iter_lines() if line.startswith("data:")]
+            assert response.status_code == 200
+        state = _rpm_and_reservations()
+    finally:
+        _stop_gateway(proc)
+
+    assert lines[-1] == "data: [DONE]"
+    assert state["rpm_tokens"] == pytest.approx(599.0, abs=0.2)
+    assert state["resv"] == 0
 
 
 @pytest.mark.integration
@@ -305,12 +360,19 @@ def _quota_config(
     port: int,
     plan_patch: dict[str, int | float | str] | None = None,
     single_provider: bool = False,
+    extra_updates: dict[str, object] | None = None,
 ) -> Path:
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = port
     raw.setdefault("quota_estimator", {})["output_p95_fallback"] = 8
     raw.setdefault("sweeper", {})["interval_s"] = 1
     raw["quota_plans"]["free"] = raw["quota_plans"]["free"] | (plan_patch or {})
+    if extra_updates:
+        for section, patch in extra_updates.items():
+            if isinstance(patch, dict) and isinstance(raw.get(section), dict):
+                raw[section] = _deep_merge(raw[section], patch)
+            else:
+                raw[section] = patch
     if single_provider:
         raw["model_groups"]["chat-large"]["deployments"] = [
             raw["model_groups"]["chat-large"]["deployments"][0]
@@ -318,6 +380,17 @@ def _quota_config(
     path = tmp_path / f"gateway-{port}.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path
+
+
+def _deep_merge(base: dict[str, object], patch: dict[str, object]) -> dict[str, object]:
+    merged = dict(base)
+    for key, value in patch.items():
+        current = merged.get(key)
+        if isinstance(value, dict) and isinstance(current, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _start_gateway(config_path: Path, port: int) -> subprocess.Popen[str]:
@@ -369,3 +442,13 @@ def _wait_for_quota_release() -> None:
             return
         time.sleep(0.1)
     raise AssertionError("quota reservation was not released after disconnect")
+
+
+def _rpm_and_reservations() -> dict[str, float | int]:
+    client = redis.Redis.from_url("redis://127.0.0.1:6379/0")
+    raw_tokens = client.hget(rpm_key("demo"), "tokens")
+    assert raw_tokens is not None
+    return {
+        "rpm_tokens": float(raw_tokens),
+        "resv": int(client.zcard(reservation_zset_key("demo"))),
+    }

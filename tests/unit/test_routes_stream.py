@@ -174,6 +174,7 @@ class _FakeQuotaService:
             deployment=deployment,
             estimate=Estimate(prompt_tokens=1, output_tokens=1, tpm_cost=2, budget_cost_micro=1),
             snapshot=self._settings,
+            month="2026-06",
         )
 
     async def settle(

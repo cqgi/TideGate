@@ -222,17 +222,22 @@ async def _stream_with_retries(
             else:
                 try:
                     deployment, provider = _pick_attempt(request, group, attempted)
-                    quota_settle = await _reserve_quota(
-                        request=request,
-                        deployment=deployment,
-                        unified=unified,
-                        snapshot=settings,
-                        count_request_rejection=False,
-                    )
+                    if quota_settle is None:
+                        quota_settle = await _reserve_quota(
+                            request=request,
+                            deployment=deployment,
+                            unified=unified,
+                            snapshot=settings,
+                        )
                 except GatewayError as exc:
                     last_error = exc
                     break
                 attempted.add((deployment.provider, deployment.upstream_model))
+            if quota_settle is not None:
+                quota_settle.use_deployment(deployment)
+            else:
+                last_error = GatewayError("quota reservation missing", ErrorCategory.INTERNAL)
+                break
             route_header = f"{deployment.provider}/{deployment.upstream_model}"
             upstream = provider.stream_chat(unified, deployment.upstream_model, deadline)
             sent_data = False
@@ -271,8 +276,6 @@ async def _stream_with_retries(
                 aclose = getattr(upstream, "aclose", None)
                 if callable(aclose):
                     await aclose()
-                await quota_settle.settle_once(None, accounting.delta_count)
-                quota_settle = None
                 continue
         if last_error is None:
             last_error = GatewayError("no deployment available", ErrorCategory.RETRYABLE_UPSTREAM)
@@ -368,6 +371,9 @@ class _QuotaSettlement:
 
     def capture_usage(self, usage: Usage | None) -> None:
         self._usage = usage
+
+    def use_deployment(self, deployment: DeploymentConfig) -> None:
+        self._reservation = self._reservation.with_deployment(deployment)
 
     async def settle_once(self, usage: Usage | None, forwarded_tokens: int) -> None:
         if self._settled:
