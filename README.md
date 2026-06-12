@@ -1,17 +1,109 @@
 # TideGate
 
-TideGate is an OpenAI-compatible LLM traffic gateway for experimenting with provider failover, quota accounting, semantic cache policy, hedged streaming, cascade routing, and usage ledgers.
+TideGate is an OpenAI-compatible gateway for routing and accounting LLM chat-completion traffic. It sits between SDK clients and a small provider pool, then handles quota admission, streaming proxying, cache lookup, provider selection, hedging, and usage settlement.
+
+```
+OpenAI SDK / curl
+        |
+        |  POST /v1/chat/completions
+        v
++----------------------- TideGate -----------------------+
+|  FastAPI edge                                           |
+|  - request id, auth, OpenAI-compatible errors, SSE       |
+|                         |                               |
+|  Quota admission        |  Redis Lua token buckets       |
+|  - RPM / TPM / streams / monthly budget                 |
+|                         |                               |
+|  Cache                  |  L1 exact -> L2 semantic       |
+|  - replay cached answers as SSE when the client streams |
+|                         |                               |
+|  Router                 |  P2C, local breakers, fallback |
+|  - hedge slow streams, cascade cheap drafts when useful |
+|                         |                               |
+|  Provider adapters      |  httpx streaming clients       |
++-------------+----------------------------+--------------+
+              |                            |
+              v                            v
+        Redis Stack                  PostgreSQL
+        quota/cache/routing state     usage ledger
+```
+
+## Core Components
+
+**Streaming API.** `POST /v1/chat/completions` follows the OpenAI chat-completions shape, including SSE responses. Upstream streams run inside cancellable `httpx` contexts, so a client disconnect closes the provider stream.
+
+**Quota admission.** Each tenant has Redis-backed limits for request rate, token rate, concurrent streams, and monthly budget. Lua scripts check and reserve quota atomically before dispatch; settlement adjusts the reservation after actual usage is known.
+
+**Cache.** L1 is an exact Redis cache over the normalized request. L2 uses embedding recall plus a cross-encoder reranker for semantic-cache decisions. Cache hits can be replayed as SSE chunks.
+
+**Routing.** A logical model can point at several upstream deployments. Selection uses power-of-two choices over local EWMA stats, filters open breakers, and can fall back to a smaller model group or stale cache when configured.
+
+**Tail latency.** Hedging can start a second upstream attempt before the first token arrives when the primary is slow and the hedge budget allows it. After one stream wins, the other attempt is cancelled.
+
+## Runtime Notes
+
+FastAPI, `httpx`, and `asyncio` handle the gateway path. Token counting and embedding/reranking work run in `ProcessPoolExecutor` so the event loop stays on I/O coordination and small bookkeeping.
 
 ## Quick Start
 
+Start Redis/Postgres:
+
 ```bash
 make up
-uv run --extra dev --extra test python -m mock_provider --host 127.0.0.1 --port 9001
-uv run --extra dev --extra test python -m mock_provider --host 127.0.0.1 --port 9002
-TIDEGATE_ADMIN_TOKEN=dev-admin MOCK_A_KEY=mock-key MOCK_B_KEY=mock-key \
-  TIDEGATE_PG_DSN=postgresql://tidegate:tidegate@127.0.0.1:5432/tidegate \
-  uv run --extra dev --extra test python -m tidegate --config config/gateway.yaml
 ```
+
+Run the local mock provider and gateway:
+
+```bash
+uv run --extra dev --extra test python -m mock_provider --host 127.0.0.1 --port 9001
+
+TIDEGATE_ADMIN_TOKEN=dev-admin \
+MOCK_A_KEY=mock-key \
+MOCK_B_KEY=mock-key \
+TIDEGATE_PG_DSN=postgresql://tidegate:tidegate@127.0.0.1:5432/tidegate \
+uv run --extra dev --extra test python -m tidegate --config config/gateway.yaml
+```
+
+Send a streaming request with the OpenAI SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="<demo key>",
+    base_url="http://127.0.0.1:8000/v1",
+)
+
+stream = client.chat.completions.create(
+    model="chat-large",
+    messages=[{"role": "user", "content": "Give me a short gateway smoke test."}],
+    stream=True,
+)
+
+for chunk in stream:
+    delta = chunk.choices[0].delta.content
+    if delta:
+        print(delta, end="", flush=True)
+```
+
+The demo key is intentionally local-only and matches the hash in `config/gateway.yaml`.
+
+## Benchmarks
+
+The numbers below are from `out/benchmark.md`.
+
+| Scenario | Result |
+|---|---:|
+| Gateway TTFT P99 | 94.598 ms |
+| Gateway E2E P99 | 200.273 ms |
+| Gateway overhead P99 | 4.950 ms |
+| Peak streaming inflight | 3082 |
+| Concurrency success rate | 0.982 |
+| Loop lag peak during concurrency run | 0.002 s |
+| Cache-hit TTFT P50 | 6.123 ms |
+| L1 hit rate in cache-hit run | 0.412 |
+| Hedge TTFT P99, off -> on | 1773.046 ms -> 295.464 ms |
+| Hedge P99 reduction | 83.3% |
 
 ## Verification
 
@@ -21,25 +113,8 @@ make test
 make up && uv run --extra dev --extra test pytest -m integration tests/integration && make down
 ```
 
-## What Is Implemented
+## Notes
 
-- OpenAI-compatible `/v1/chat/completions`, streaming SSE replay, `/v1/models`, `/metrics`.
-- Per-tenant quota reservation and exact-once settlement through Redis Lua scripts.
-- Provider routing with P2C selection, local circuit breakers, fallback, smaller-model degradation, and stale-cache degradation.
-- L1 exact cache, L2 Redis Stack semantic cache, tenant-selected calibrated operating points, cache feedback eviction.
-- Streaming hedge requests with budget limits and loser cancellation.
-- Non-stream cascade routing using draft model `mean_logprob`.
-- PostgreSQL usage ledger with batched idempotent inserts and shutdown drain.
+The benchmark uses a deterministic mock provider so latency, failover, and cache behavior can be reproduced without external model APIs.
 
-## Architecture And Reports
-
-- Architecture: `docs/architecture.md`
-- Benchmark report: `out/benchmark.md`
-
-Latest local benchmark:
-
-| metric | value |
-|---|---:|
-| Gateway TTFT P99 | 102.622 ms |
-| Gateway E2E P99 | 196.265 ms |
-| Peak inflight | 56 |
+Out of scope: agent workflows, frontend UI, and full RAG application logic.
