@@ -20,8 +20,8 @@ local budget_est_micro = tonumber(data["budget_est_micro"])
 local reservation_month = data["month"] or current_month
 local refund_budget_key = budget_key
 if reservation_month ~= current_month then
-  -- DECISION: TideGate M2 targets standalone Redis, not cluster; dynamic same-prefix budget
-  -- keys keep cross-month refunds correct without changing Python key builders.
+  -- Refund into the reservation's own month bucket. Rebuild the budget key from the
+  -- shared prefix so a settle that crosses a month boundary lands on the right month.
   local prefix = string.match(budget_key, "^(.*:budget:)")
   refund_budget_key = prefix .. reservation_month
 end

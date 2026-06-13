@@ -21,8 +21,8 @@ for _, request_id in ipairs(request_ids) do
     local reservation_month = data["month"] or current_month
     local refund_budget_key = budget_key
     if reservation_month ~= current_month then
-      -- DECISION: TideGate M2 targets standalone Redis, not cluster; dynamic same-prefix budget
-      -- keys keep cross-month sweep refunds correct without changing Python key builders.
+      -- Sweep refunds go back to the reservation's own month bucket. Rebuild the key
+      -- from the shared prefix so an expired cross-month reservation refunds correctly.
       local prefix = string.match(budget_key, "^(.*:budget:)")
       refund_budget_key = prefix .. reservation_month
     end
