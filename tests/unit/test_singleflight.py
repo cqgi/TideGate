@@ -7,7 +7,6 @@ from tidegate.cache.singleflight import SingleFlight
 
 @pytest.mark.asyncio
 async def test_leader_success_clears_future_and_wakes_follower() -> None:
-    """SPEC-M4-3."""
     sf: SingleFlight[str] = SingleFlight()
     leader = sf.acquire("k")
     follower = sf.acquire("k")
@@ -23,7 +22,6 @@ async def test_leader_success_clears_future_and_wakes_follower() -> None:
 
 @pytest.mark.asyncio
 async def test_leader_failure_clears_future_and_follower_can_fallback() -> None:
-    """SPEC-M4-3."""
     sf: SingleFlight[str] = SingleFlight()
     leader = sf.acquire("k")
     follower = sf.acquire("k")

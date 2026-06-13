@@ -24,7 +24,7 @@ def build_providers(config: GatewayConfig) -> dict[str, Provider]:
 
     providers: dict[str, Provider] = {}
     for name, provider_config in config.providers.items():
-        # SPEC-M1-3: each provider instance owns its httpx connection pool.
+        # Each provider instance owns its httpx connection pool.
         providers[name] = build_provider(name, provider_config)
     return providers
 

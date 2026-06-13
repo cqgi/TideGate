@@ -29,7 +29,7 @@ class DisconnectAwareStreamingResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
             return
 
-        # SPEC-M0-5: Starlette ASGI 2.4 path no longer listens for disconnects by default.
+        # Starlette's ASGI 2.4 path no longer listens for disconnects by default.
         stream_task = asyncio.create_task(self.stream_response(send))
         disconnect_task = asyncio.create_task(self.listen_for_disconnect(receive))
         done, pending = await asyncio.wait(
@@ -105,7 +105,7 @@ async def with_heartbeats(
     deltas: AsyncIterator[UnifiedDelta],
     heartbeat_interval_s: float,
 ) -> AsyncIterator[UnifiedDelta | None]:
-    # SPEC-M0-5: yield None as an SSE heartbeat slot while upstream is idle.
+    # Yield None as an SSE heartbeat slot while upstream is idle.
     pending: asyncio.Task[UnifiedDelta] = asyncio.create_task(_next_delta(deltas))
     try:
         while True:

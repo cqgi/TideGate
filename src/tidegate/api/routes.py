@@ -132,7 +132,7 @@ async def chat_completions(request: Request) -> Response:
     try:
         raw_body = await request.json()
     except json.JSONDecodeError as exc:
-        # REWORK-M0-4: malformed JSON is a client 422, not a server 500.
+        # Malformed JSON is a client 422, not a server 500.
         raise GatewayError(
             "request body must be valid JSON",
             ErrorCategory.CLIENT_ERROR,
@@ -153,7 +153,7 @@ async def chat_completions(request: Request) -> Response:
     request_id: str = request.state.request_id
     deadline = _deadline(settings)
     unified = _unified_request(request, incoming, raw_body, tenant, request_id)
-    # REWORK-M0-1: gateway overhead is request receipt through upstream dispatch.
+    # Gateway overhead is request receipt through upstream dispatch.
     request.app.state.metrics.overhead.observe(time.monotonic() - request_started)
     levels = RoutingLadder(settings).levels(incoming.model, tenant)
     if incoming.stream:
@@ -208,8 +208,8 @@ async def chat_completions(request: Request) -> Response:
                         },
                     )
                 except Exception:
-                    # SPEC-M4-3: stream followers also fall back to an independent upstream
-                    # stream when the leader fails instead of inheriting the leader error.
+                    # Stream followers fall back to an independent upstream stream when
+                    # the leader fails instead of inheriting the leader error.
                     pass
             else:
                 cache_hit = await _lookup_cache_with_spans(request, unified, tenant, settings)
@@ -338,7 +338,7 @@ async def _render_stream_delta(
     request_id: str,
 ) -> AsyncIterator[bytes]:
     if await request.is_disconnected():
-        # SPEC-M0-5: client disconnects close upstream streaming immediately.
+        # Close upstream streaming immediately when the client disconnects.
         request.app.state.metrics.upstream_aborted.labels(
             provider=provider_name, reason="client_disconnect"
         ).inc()
@@ -669,8 +669,8 @@ async def _stream_with_retries(
                 route_header = _route_header(deployment)
                 quota_settle.use_deployment(deployment)
                 async for chunk in body_iterator:
-                    # DECISION: REWORK-M1-1 treats only SSE data events as the idempotency
-                    # boundary; heartbeat comments can be followed by a safe TTFT retry.
+                    # Only SSE data events form the idempotency boundary; heartbeat
+                    # comments can still be followed by a safe TTFT retry.
                     if chunk.startswith(b"data:"):
                         sent_data = True
                     yield chunk
@@ -763,8 +763,8 @@ async def _stream_with_retries(
                 unified.request_id,
                 stale_hit.semcache_entry_id,
             )
-            # SPEC-M4-7: streaming headers were already sent at admission time, so
-            # stale-cache degradation is only visible through the replayed SSE body.
+            # Streaming headers were already sent at admission time, so stale-cache
+            # degradation is only visible through the replayed SSE body.
             outcome = "degraded"
             route_header = "cache"
             if flight is not None and flight.leader:
@@ -775,7 +775,7 @@ async def _stream_with_retries(
             async for chunk in _stream_cached_response(request, incoming, stale_hit.response):
                 yield chunk
             return
-        # REWORK-M1-2: once StreamingResponse has been selected, every failure is in-band.
+        # Once StreamingResponse has been selected, every failure is in-band.
         structlog.get_logger().error(
             "stream_request_failed",
             category=last_error.category.value,
@@ -896,12 +896,12 @@ async def _call_non_stream_with_retries(
             )
             return _ChatResult(response, "cache", "hit-exact")
         except Exception:
-            # SPEC-M4-3: follower fallback is an independent upstream attempt when leader fails.
+            # Follower fallback is an independent upstream attempt when the leader fails.
             pass
     else:
-        # SPEC-M4-3: a request can miss L1 before the previous leader stores, then acquire
-        # a fresh leader slot after that leader releases. Re-check before calling upstream
-        # so the same concurrent miss still collapses to one provider request.
+        # A request can miss L1 before the previous leader stores, then acquire a fresh
+        # leader slot after that leader releases. Re-check before calling upstream so
+        # the same concurrent miss still collapses to one provider request.
         cache_hit = await _lookup_cache_with_spans(request, unified, tenant, settings)
         if cache_hit is not None:
             await cache_quota.refund_full()
@@ -1484,7 +1484,7 @@ def _unified_request(
     body = dict(raw_body)
     mock_directive = request.headers.get("x-mock-directive")
     if mock_directive is not None:
-        # DECISION: M0 keeps deterministic mock tests header-driven without public API.
+        # Deterministic mock tests stay header-driven without changing the public API.
         body["__tidegate_mock_directive"] = mock_directive
     prompt_version = request.headers.get("X-Prompt-Version", "default")
     return UnifiedRequest(

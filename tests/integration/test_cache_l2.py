@@ -31,7 +31,6 @@ def test_l2_paraphrase_hits_semantic(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M4-5."""
     del l2_model_ready, mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -61,7 +60,6 @@ def test_l2_multiturn_is_bypassed(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M4-2."""
     del l2_model_ready, mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -98,7 +96,6 @@ def test_l2_isolates_tenant_and_prompt_version(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M4-5."""
     del l2_model_ready, mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -138,7 +135,6 @@ def test_feedback_evicts_semantic_entry(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M4-7."""
     del l2_model_ready, mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -175,7 +171,6 @@ def test_stale_cache_degrades_after_upstream_exhaustion(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M4-7."""
     del l2_model_ready, mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -205,7 +200,6 @@ def test_l2_operating_point_is_tenant_selected(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """REWORK-M4-2."""
     del l2_model_ready, mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)

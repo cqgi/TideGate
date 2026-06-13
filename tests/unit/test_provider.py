@@ -19,32 +19,27 @@ from tidegate.providers.openai_compat import (
 
 
 def test_parse_sse_bad_json_is_gateway_error() -> None:
-    """REWORK-M0-6."""
     with pytest.raises(GatewayError) as exc_info:
         _parse_sse_line("data: {bad json")
     assert exc_info.value.category == ErrorCategory.RETRYABLE_UPSTREAM
 
 
 def test_retry_after_http_date_and_invalid() -> None:
-    """REWORK-M0-3."""
     assert _parse_retry_after("not a date") is None
     assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
 
 
 def test_connect_timeout_is_retryable() -> None:
-    """REWORK-M0-3."""
     assert issubclass(httpx.ConnectTimeout, httpx.TimeoutException)
 
 
 def test_non_stream_timeout_uses_total_deadline_for_reads() -> None:
-    """REWORK-M1-3."""
     deadline = Deadline(connect_s=0.1, ttft_s=0.1, inter_chunk_s=0.1, total_deadline=999999999.0)
     timeout = _non_stream_timeout(deadline)
     assert timeout.read is None
 
 
 def test_parse_sse_line_preserves_finish_reason_with_usage() -> None:
-    """REWORK-M1-6."""
     delta = _parse_sse_line(
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
         '"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}'
@@ -56,7 +51,6 @@ def test_parse_sse_line_preserves_finish_reason_with_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_provider_connect_refused_is_retryable() -> None:
-    """SPEC-M1-1."""
     provider = OpenAICompatibleProvider(
         "dead",
         ProviderConfig(
@@ -83,7 +77,6 @@ async def test_provider_connect_refused_is_retryable() -> None:
 
 @pytest.mark.asyncio
 async def test_provider_ttft_timeout_classification() -> None:
-    """SPEC-M1-1."""
     provider = _mock_stream_provider(delay_s=0.05)
     req = _stream_request()
     deadline = Deadline(
@@ -101,7 +94,6 @@ async def test_provider_ttft_timeout_classification() -> None:
 
 @pytest.mark.asyncio
 async def test_provider_total_timeout_classification() -> None:
-    """SPEC-M1-1."""
     provider = _mock_stream_provider(delay_s=0.05)
     req = _stream_request()
     deadline = Deadline(

@@ -8,7 +8,6 @@ from tidegate.core.models import ChatMessage, UnifiedRequest, UnifiedResponse, U
 
 
 def test_read_gate_bypasses_volatile_and_tools() -> None:
-    """SPEC-M4-2."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     tenant = settings.tenants[0]
 
@@ -17,7 +16,6 @@ def test_read_gate_bypasses_volatile_and_tools() -> None:
 
 
 def test_l2_requires_single_user_turn() -> None:
-    """SPEC-M4-2."""
     assert l2_context_allowed(_req("单轮"))
     assert not l2_context_allowed(
         _req(
@@ -31,7 +29,6 @@ def test_l2_requires_single_user_turn() -> None:
 
 
 def test_store_gate_rejects_degraded_and_bad_content() -> None:
-    """SPEC-M4-2."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     tenant = settings.tenants[0]
 

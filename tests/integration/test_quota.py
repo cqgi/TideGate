@@ -43,7 +43,6 @@ def test_quota_rejects_each_dimension(
     mock_a_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M2-3 and SPEC-M2-6."""
     del mock_a_proc
     ports = {"rpm": 8020, "tpm": 8021, "concurrency": 8022, "budget": 8023}
     port = ports[dim]
@@ -73,7 +72,6 @@ def test_quota_settlement_refunds_estimate_delta(
     mock_a_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M2-3."""
     del mock_a_proc
     reset_mock(MOCK_A_URL)
     port = 8024
@@ -114,7 +112,6 @@ def test_stream_disconnect_releases_concurrency(
     mock_a_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M2-6."""
     del mock_a_proc
     reset_mock(MOCK_A_URL)
     port = 8027
@@ -159,7 +156,6 @@ def test_stream_retry_charges_single_rpm(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """REWORK-M2-1."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     port = 8028
@@ -211,7 +207,6 @@ def test_stream_retry_charges_single_rpm(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_service_double_instance_does_not_oversell(redis_stack_proc: None) -> None:
-    """SPEC-M2-1 and SPEC-M2-3."""
     del redis_stack_proc
     snapshot = load_config(Path("tests/fixtures/gateway-test.yaml")).model_copy(
         update={
@@ -260,7 +255,6 @@ def test_redis_down_fallback_open_and_closed(
     mock_a_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M2-5."""
     del redis_stack_proc, mock_a_proc
     open_path = _quota_config(
         tmp_path,

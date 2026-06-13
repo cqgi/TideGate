@@ -17,7 +17,6 @@ from tidegate.quota.service import QuotaService
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sweep_refunds_expired_reservation(redis_stack_proc: None) -> None:
-    """SPEC-M2-4."""
     del redis_stack_proc
     snapshot = load_config(Path("tests/fixtures/gateway-test.yaml")).model_copy(
         update={
@@ -63,7 +62,6 @@ async def test_sweep_refunds_expired_reservation(redis_stack_proc: None) -> None
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_cross_month_settle_refunds_reservation_month(redis_stack_proc: None) -> None:
-    """REWORK-M2-4."""
     del redis_stack_proc
     snapshot = load_config(Path("tests/fixtures/gateway-test.yaml"))
     client = redis.Redis.from_url("redis://127.0.0.1:6379/0", decode_responses=False)

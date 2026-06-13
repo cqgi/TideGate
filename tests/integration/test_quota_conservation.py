@@ -21,7 +21,6 @@ from tidegate.quota.service import QuotaReservation, QuotaService
 @settings(max_examples=20, deadline=None)
 @given(st.lists(st.integers(min_value=0, max_value=8), min_size=50, max_size=120))
 async def test_quota_conservation(redis_stack_proc: None, actual_tokens: list[int]) -> None:
-    """SPEC-M2-3 conservation invariant."""
     del redis_stack_proc
     snapshot = _snapshot()
     client = redis.Redis.from_url("redis://127.0.0.1:6379/0", decode_responses=False)
@@ -62,7 +61,7 @@ async def test_quota_conservation(redis_stack_proc: None, actual_tokens: list[in
     assert state["resv"] == 0
     tpm_tokens = state["tpm_tokens"]
     assert isinstance(tpm_tokens, float)
-    # SPEC-M2-3: the Lua bucket refills between reservations using real now_ms; conservation is
+    # The Lua bucket refills between reservations using real now_ms; conservation is
     # checked within that bounded refill error rather than by freezing server time.
     assert abs((initial_tpm - tpm_tokens) - expected_spent) < 2.0
 

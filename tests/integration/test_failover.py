@@ -19,7 +19,6 @@ def test_failover_and_recovery(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M3-2, SPEC-M3-3, and SPEC-M3-5."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -67,7 +66,6 @@ def test_slow_failure_opens_breaker(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M3-1."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -96,7 +94,6 @@ def test_rate_limit_cools_down_without_opening_breaker(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M3-1."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -131,7 +128,6 @@ def test_smaller_model_degradation_and_exhausted_502(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M3-4."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)

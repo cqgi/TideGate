@@ -98,7 +98,7 @@ class QuotaEstimator:
             key,
             mapping={
                 "ewma_ratio": str(next_ratio),
-                # DECISION: SPEC-M2-2 uses EWMA as a compact online approximation to P95.
+                # EWMA is a compact online approximation for the local P95 estimate.
                 "output_ewma": str(next_output),
             },
         )

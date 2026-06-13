@@ -1,4 +1,4 @@
-# REWORK-M0-7: keep generated local artifacts out of the initialized repository.
+# Keep generated local artifacts out of the repository.
 .DS_Store
 .venv/
 .mypy_cache/

@@ -35,7 +35,6 @@ def test_ledger_writes_concurrent_requests(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-3."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -60,7 +59,6 @@ def test_ledger_survives_gateway_sigterm(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-3."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -90,7 +88,6 @@ def test_sigterm_drains_inflight_streams_and_ledger(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-F-5."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -136,7 +133,6 @@ def test_sigterm_drains_inflight_streams_and_ledger(
 
 @pytest.mark.integration
 def test_ledger_batcher_is_idempotent_for_duplicate_request_id() -> None:
-    """SPEC-M5-3."""
     _truncate_ledger()
 
     async def run() -> int:
@@ -164,7 +160,6 @@ def test_ledger_buffers_while_postgres_restarts(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-3."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)

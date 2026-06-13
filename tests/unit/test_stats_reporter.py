@@ -13,7 +13,6 @@ from tidegate.routing.stats import RoutingState
 
 
 def test_slow_ttft_feeds_breaker_failure() -> None:
-    """SPEC-M3-1."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     state = RoutingState(settings)
     deployment = settings.model_groups["chat-large"].deployments[0]
@@ -26,7 +25,6 @@ def test_slow_ttft_feeds_breaker_failure() -> None:
 
 
 def test_rate_limit_cools_down_without_opening_breaker() -> None:
-    """SPEC-M3-1."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     state = RoutingState(settings)
     deployment = settings.model_groups["chat-large"].deployments[0]
@@ -41,7 +39,6 @@ def test_rate_limit_cools_down_without_opening_breaker() -> None:
 
 
 def test_error_rate_ewma_bootstrap_distinguishes_initialized_zero() -> None:
-    """REWORK-M3-1."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     state = RoutingState(settings)
     deployment = settings.model_groups["chat-large"].deployments[0]
@@ -57,7 +54,6 @@ def test_error_rate_ewma_bootstrap_distinguishes_initialized_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_report_once_writes_aggregate_keys() -> None:
-    """SPEC-M3-5."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     state = RoutingState(settings)
     deployment = settings.model_groups["chat-large"].deployments[0]
@@ -79,7 +75,6 @@ async def test_report_once_writes_aggregate_keys() -> None:
 
 @pytest.mark.asyncio
 async def test_prewarm_opens_when_majority_instances_open() -> None:
-    """SPEC-M3-5."""
     settings = load_config(Path("tests/fixtures/gateway-test.yaml"))
     state = RoutingState(settings)
     deployment = settings.model_groups["chat-large"].deployments[0]

@@ -97,8 +97,8 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task_registry = TaskRegistry()
         redis_client = redis.from_url(settings.redis.url, decode_responses=False)
-        # REWORK-M2-5: token counting uses this shared CPU pool; M4 embedding has its
-        # own pool below because fastembed model weights live in worker initializers.
+        # Token counting uses this shared CPU pool; embedding has its own pool below
+        # because fastembed model weights live in worker initializers.
         cpu_pool = ProcessPoolExecutor(max_workers=settings.server.cpu_pool_workers)
         embedding_pool: ProcessPoolExecutor | None = None
         embedding_service: EmbeddingService | None = None
@@ -177,7 +177,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
                 now_s=asyncio.get_running_loop().time(),
             )
         except redis.RedisError as exc:
-            # DECISION: M2 keeps serving so per-tenant fail_mode can decide open/closed fallback.
+            # Keep serving so each tenant's fail_mode can decide open or closed fallback.
             structlog.get_logger().warning("redis_unavailable_hot_reload_disabled", error=str(exc))
         else:
             task_registry.create(

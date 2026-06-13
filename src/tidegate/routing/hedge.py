@@ -41,7 +41,7 @@ def trigger_delay_s(
     state: RoutingState,
     config: HedgingConfig,
 ) -> float:
-    # DECISION: SPEC-M5-1 approximates local P95 with EWMA TTFT x 1.5 so hedging reuses
-    # M3 instance-local stats instead of introducing a second latency statistics system.
+    # Approximate local P95 with EWMA TTFT x 1.5 so hedging can reuse instance-local
+    # stats instead of introducing a second latency statistics system.
     ewma = state.stats_for(deployment).ewma_ttft_s
     return max(config.trigger_floor_s, ewma * 1.5)

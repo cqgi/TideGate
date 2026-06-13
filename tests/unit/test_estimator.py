@@ -25,7 +25,6 @@ class FakeCorrectionStore:
 
 @pytest.mark.asyncio
 async def test_estimator_uses_prompt_max_tokens_and_price() -> None:
-    """SPEC-M2-2."""
     snapshot = load_config(Path("tests/fixtures/gateway-test.yaml"))
     deployment = snapshot.model_groups["chat-large"].deployments[0]
     store = FakeCorrectionStore()
@@ -42,7 +41,6 @@ async def test_estimator_uses_prompt_max_tokens_and_price() -> None:
 
 @pytest.mark.asyncio
 async def test_estimator_updates_ratio_and_output_ewma() -> None:
-    """SPEC-M2-2."""
     snapshot = load_config(Path("tests/fixtures/gateway-test.yaml"))
     deployment = snapshot.model_groups["chat-large"].deployments[0]
     store = FakeCorrectionStore()

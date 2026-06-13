@@ -6,7 +6,7 @@ from tidegate.obs.metrics import Metrics
 
 
 async def probe_loop_lag(metrics: Metrics, interval_s: float) -> None:
-    # SPEC-M0-6: baseline loop-lag probe for event-loop health.
+    # Baseline loop-lag probe for event-loop health.
     loop = asyncio.get_running_loop()
     while True:
         expected = loop.time() + interval_s
