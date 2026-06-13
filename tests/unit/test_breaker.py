@@ -17,7 +17,6 @@ from tidegate.routing.breaker import BreakerState, CircuitBreaker
     ],
 )
 def test_breaker_transition_table(events: list[bool | str], expected: BreakerState) -> None:
-    """SPEC-M3-2."""
     breaker = CircuitBreaker(
         BreakerConfig(
             window_size=4,
@@ -41,7 +40,6 @@ def test_breaker_transition_table(events: list[bool | str], expected: BreakerSta
 
 
 def test_half_open_probe_limit() -> None:
-    """SPEC-M3-2."""
     breaker = CircuitBreaker(
         BreakerConfig(
             window_size=2,

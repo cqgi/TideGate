@@ -6,7 +6,6 @@ from tidegate.obs.metrics import Metrics
 
 
 def test_metrics_contract_names_and_labels() -> None:
-    """REWORK-M0-1."""
     metrics = Metrics.create()
     metrics.requests.labels("demo", "chat-large", "client_disconnect").inc()
     metrics.ttft.labels("mock-a", "chat-large").observe(0.1)

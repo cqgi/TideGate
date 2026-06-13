@@ -18,7 +18,6 @@ from tidegate.obs.metrics import Metrics
 
 @pytest.mark.asyncio
 async def test_l2_lookup_timeout_covers_embedding() -> None:
-    """SPEC-M4-5."""
     base = load_config("tests/fixtures/gateway-test.yaml")
     settings = base.model_copy(
         update={
@@ -42,7 +41,6 @@ async def test_l2_lookup_timeout_covers_embedding() -> None:
 
 @pytest.mark.asyncio
 async def test_l2_store_timeout_skips_semantic_write() -> None:
-    """SPEC-M4-5."""
     base = load_config("tests/fixtures/gateway-test.yaml")
     settings = base.model_copy(
         update={
@@ -69,7 +67,6 @@ async def test_l2_store_timeout_skips_semantic_write() -> None:
 
 @pytest.mark.asyncio
 async def test_l2_capacity_sweep_survives_redis_error() -> None:
-    """SPEC-M4-5."""
     base = load_config("tests/fixtures/gateway-test.yaml")
     settings = base.model_copy(
         update={
@@ -90,7 +87,6 @@ async def test_l2_capacity_sweep_survives_redis_error() -> None:
 
 @pytest.mark.asyncio
 async def test_l2_rerank_threshold_selects_best_candidate() -> None:
-    """SPEC-F-2."""
     base = load_config("tests/fixtures/gateway-test.yaml")
     raw = base.model_dump()
     raw["cache"]["l2"]["recall_threshold"] = 0.70
@@ -132,7 +128,6 @@ async def test_l2_rerank_threshold_selects_best_candidate() -> None:
 
 @pytest.mark.asyncio
 async def test_l1_lookup_redis_error_is_cache_miss() -> None:
-    """SPEC-M4-3."""
     settings = load_config("tests/fixtures/gateway-test.yaml")
     service = CacheService(
         _FailingL1(),
@@ -146,7 +141,6 @@ async def test_l1_lookup_redis_error_is_cache_miss() -> None:
 
 @pytest.mark.asyncio
 async def test_l1_store_redis_error_does_not_escape() -> None:
-    """SPEC-M4-3."""
     settings = load_config("tests/fixtures/gateway-test.yaml")
     service = CacheService(
         _FailingL1(),

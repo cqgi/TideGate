@@ -137,8 +137,7 @@ def _mock_directive(args: argparse.Namespace) -> dict[str, object]:
 def _prompt(index: int, cache_hit_ratio: float) -> str:
     if cache_hit_ratio > 0 and random.random() < cache_hit_ratio:
         return f"cacheable shared prompt {index % 10}"
-    # DECISION: REWORK-M4-3 makes loadgen unique by default so latency numbers are not
-    # accidentally dominated by L1/L2 cache hits.
+    # Keep prompts unique by default so latency numbers are not dominated by cache hits.
     return f"unique loadgen prompt {index}-{time.monotonic_ns()}"
 
 

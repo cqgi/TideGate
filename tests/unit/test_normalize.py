@@ -5,7 +5,6 @@ from tidegate.core.models import ChatMessage, UnifiedRequest
 
 
 def test_l1_key_is_stable_for_whitespace_and_dict_order() -> None:
-    """SPEC-M4-1."""
     req_a = _req(content="  怎么退款  ", raw_body={"b": 2, "a": 1})
     req_b = _req(content="怎么退款", raw_body={"a": 1, "b": 2})
 
@@ -13,7 +12,6 @@ def test_l1_key_is_stable_for_whitespace_and_dict_order() -> None:
 
 
 def test_canonical_field_set_is_frozen() -> None:
-    """SPEC-M4-1."""
     req = _req(content="hi")
 
     assert set(canonical_form(req)) == {

@@ -26,7 +26,6 @@ def test_hedge_stream_winner_aborts_loser(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-1."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -60,7 +59,6 @@ def test_hedge_budget_skips_after_limit(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-1."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)

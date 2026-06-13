@@ -30,7 +30,6 @@ from tidegate.quota.keys import rpm_key, tpm_key
 def test_l1_second_request_hit_exact_and_quota_refund(
     gateway_proc: subprocess.Popen[str],
 ) -> None:
-    """SPEC-M4-3 and SPEC-M4-4."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     with httpx.Client(timeout=2, trust_env=False) as client:
@@ -62,7 +61,6 @@ def test_l1_second_request_hit_exact_and_quota_refund(
 
 @pytest.mark.integration
 def test_l1_temperature_changes_key(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M4-1."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     with httpx.Client(timeout=5, trust_env=False) as client:
@@ -77,7 +75,6 @@ def test_l1_temperature_changes_key(gateway_proc: subprocess.Popen[str]) -> None
 
 @pytest.mark.integration
 def test_singleflight_collapses_concurrent_miss(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M4-3."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -104,7 +101,6 @@ def test_singleflight_collapses_concurrent_miss(gateway_proc: subprocess.Popen[s
 
 @pytest.mark.integration
 def test_stream_replay_from_cache_openai_sdk(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M4-4."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     headers = {"x-mock-directive": json.dumps({"ttft_ms": 10, "output_tokens": 6})}
@@ -138,7 +134,6 @@ def test_stream_replay_from_cache_openai_sdk(gateway_proc: subprocess.Popen[str]
 
 @pytest.mark.integration
 def test_stream_success_populates_l1_cache(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M4-3 and SPEC-M4-4."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     headers = {"x-mock-directive": json.dumps({"ttft_ms": 10, "output_tokens": 4})}
@@ -180,7 +175,6 @@ def test_stream_success_populates_l1_cache(gateway_proc: subprocess.Popen[str]) 
 def test_stream_singleflight_collapses_concurrent_miss(
     gateway_proc: subprocess.Popen[str],
 ) -> None:
-    """SPEC-M4-3 and SPEC-M4-4."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -200,7 +194,6 @@ def test_stream_singleflight_collapses_concurrent_miss(
 
 @pytest.mark.integration
 def test_volatile_intent_bypasses_cache(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M4-2."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     body: dict[str, object] = {
@@ -224,7 +217,6 @@ def test_disabled_l1_bypasses_cache_and_singleflight(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M4-2."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)

@@ -31,7 +31,7 @@ class ProviderManager:
             if previous.providers.get(name) == provider_config and name in self._providers:
                 next_providers[name] = self._providers[name]
             else:
-                # SPEC-M1-4: only changed/new provider instances get rebuilt.
+                # Only changed or new provider instances get rebuilt.
                 next_providers[name] = build_provider(name, provider_config)
         for name, provider in self._providers.items():
             if current.providers.get(name) != previous.providers.get(name):

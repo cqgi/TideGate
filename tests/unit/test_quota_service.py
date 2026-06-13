@@ -33,7 +33,6 @@ class FakeEstimator(QuotaEstimator):
 
 @pytest.mark.asyncio
 async def test_settle_double_failure_is_swallowed_and_counted() -> None:
-    """REWORK-M2-2."""
     snapshot = load_config(Path("tests/fixtures/gateway-test.yaml"))
     metrics = Metrics.create()
     quota = QuotaService(

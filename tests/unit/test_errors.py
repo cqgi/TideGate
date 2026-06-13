@@ -21,10 +21,8 @@ from tidegate.core.errors import ErrorCategory, GatewayError
     ],
 )
 def test_status_for_error_all_categories(category: ErrorCategory, expected: int) -> None:
-    """REWORK-M0-6."""
     assert _status_for_error(GatewayError("x", category)) == expected
 
 
 def test_status_for_error_explicit_status_wins() -> None:
-    """REWORK-M0-6."""
     assert _status_for_error(GatewayError("x", ErrorCategory.CLIENT_ERROR, http_status=404)) == 404

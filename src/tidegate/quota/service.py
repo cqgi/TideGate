@@ -236,8 +236,8 @@ class QuotaService:
                 retry_after_s=1.0,
                 code="tpm_exceeded",
             ) from exc
-        # DECISION: SPEC-M2-5 permits open-mode local fallback without Redis reservation;
-        # later reconciliation absorbs drift when Redis recovers.
+        # Open-mode tenants fall back to a local limiter without writing a Redis
+        # reservation; later reconciliation absorbs drift when Redis recovers.
         return QuotaReservation(
             tenant_id=tenant.id,
             request_id=req.request_id,
@@ -310,8 +310,8 @@ def _decode_float(raw: object | None) -> float:
 def _fallback_usage(estimate: Estimate, forwarded_tokens: int) -> Usage:
     completion = max(0, forwarded_tokens)
     prompt = max(0, estimate.tpm_cost - estimate.output_tokens)
-    # DECISION: SPEC-M2-3 settles missing upstream usage with forwarded tokens plus the
-    # reserved prompt estimate so disconnects still release conc exactly once.
+    # Missing upstream usage is settled with forwarded tokens plus the reserved prompt
+    # estimate so disconnects still release concurrency exactly once.
     return Usage(
         prompt_tokens=prompt,
         completion_tokens=completion,

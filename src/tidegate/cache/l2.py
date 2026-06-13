@@ -149,8 +149,8 @@ class L2Cache:
         return cast(object, await self._redis.execute_command(*args))  # type: ignore[no-untyped-call]
 
     async def enforce_capacity(self, capacity: int) -> None:
-        # DECISION: M4 uses a bounded best-effort SCAN cleanup; exact global ordering is
-        # unnecessary for the small personal-project Redis index size.
+        # A bounded best-effort SCAN cleanup is enough for this Redis index size; exact
+        # global ordering would add complexity without improving the runtime path.
         entries: list[tuple[float, str]] = []
         async for key in self._redis.scan_iter(match="semcache:*"):
             raw = await self._redis.hget(key, "last_hit_at")

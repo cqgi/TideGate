@@ -15,7 +15,6 @@ from tests.integration.conftest import API_KEY, BASE_URL, MOCK_A_URL, MOCK_B_URL
 
 @pytest.mark.integration
 def test_stream_and_non_stream_match(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M0-5."""
     del gateway_proc
     directive = {"ttft_ms": 10, "tpot_ms": 1, "output_tokens": 5}
     headers = {"x-mock-directive": json.dumps(directive)}
@@ -42,7 +41,6 @@ def test_stream_and_non_stream_match(gateway_proc: subprocess.Popen[str]) -> Non
 
 @pytest.mark.integration
 def test_disconnect_aborts_upstream(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M0-5."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -87,7 +85,6 @@ def test_disconnect_aborts_upstream(gateway_proc: subprocess.Popen[str]) -> None
 
 @pytest.mark.integration
 def test_error_shapes(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M0-3."""
     del gateway_proc
     with httpx.Client(timeout=2, trust_env=False) as client:
         unauthorized = client.post(
@@ -122,7 +119,6 @@ def test_error_shapes(gateway_proc: subprocess.Popen[str]) -> None:
 
 @pytest.mark.integration
 def test_heartbeat(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M0-5."""
     del gateway_proc
     directive = {"ttft_ms": 2000, "tpot_ms": 1, "output_tokens": 1}
     headers = {

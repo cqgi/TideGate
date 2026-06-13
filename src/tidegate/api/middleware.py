@@ -101,7 +101,7 @@ class AuthMiddleware:
         authorization = headers.get("Authorization", "")
         prefix = "Bearer "
         if not authorization.startswith(prefix):
-            # SPEC-M0-3: data-plane auth failures use OpenAI-compatible 401 JSON.
+            # Data-plane auth failures use OpenAI-compatible 401 JSON.
             await self._send_error(
                 scope,
                 receive,
@@ -114,7 +114,7 @@ class AuthMiddleware:
         with start_span("auth"):
             tenant = self._cache.get(key_hash) or self._find_tenant(key_hash)
         if tenant is None:
-            # SPEC-M0-3: compare sha256(api_key) against tenant config.
+            # Compare sha256(api_key) against tenant config.
             await self._send_error(
                 scope,
                 receive,
@@ -130,7 +130,7 @@ class AuthMiddleware:
         if self._cache_version == self._config.version:
             return
         current = self._config.current.server
-        # SPEC-M1-4: tenant reloads invalidate cached auth decisions immediately.
+        # Tenant reloads invalidate cached auth decisions immediately.
         self._cache = _AuthCache(current.auth_cache_size, current.auth_cache_ttl_s)
         self._cache_version = self._config.version
 

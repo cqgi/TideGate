@@ -35,15 +35,15 @@ def init_embedding_worker(
     os.environ.setdefault("HF_HOME", cache_dir)
     from fastembed import TextEmbedding
 
-    # DECISION: M4 keeps the fastembed model inside the embedding pool worker so
-    # requests do not serialize model state or reload weights per call.
+    # Keep the fastembed model inside the worker so requests do not serialize model
+    # state or reload weights per call.
     _MODEL = cast(_EmbedModel, TextEmbedding(model_name=model_name, cache_dir=cache_dir))
     _RERANKER = None
     if reranker_model is not None:
         from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-        # DECISION: SPEC-F-2 colocates reranker and embedding models in the same L2
-        # process pool so the query timeout covers both recall embedding and reranking.
+        # Colocate the reranker and embedding models in the same process pool so the
+        # query timeout covers both recall embedding and reranking.
         _RERANKER = cast(
             _RerankModel,
             TextCrossEncoder(model_name=reranker_model, cache_dir=cache_dir),

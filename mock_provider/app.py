@@ -63,7 +63,7 @@ def create_app(defaults: MockDefaults) -> FastAPI:
                 headers={"Retry-After": str(directive.retry_after_s)},
             )
 
-        # SPEC-M0-1: expose deterministic OpenAI-compatible generation plus abort stats.
+        # Expose deterministic OpenAI-compatible generation plus abort stats.
         stats.started += 1
         if body.get("stream") is True:
             return StreamingResponse(
@@ -124,7 +124,7 @@ async def _tracked_stream(
     completed = False
     aborted = False
     try:
-        # SPEC-M0-1: incomplete streams count as aborted for disconnect verification.
+        # Incomplete streams count as aborted for disconnect verification.
         async for chunk in stream_chunks(body, directive, request):
             yield chunk
         completed = True

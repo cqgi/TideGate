@@ -47,21 +47,21 @@ class Metrics:
             ttft=Histogram(
                 "tidegate_ttft_seconds",
                 "Upstream time to first token",
-                # REWORK-M0-1: match contract labels and avoid tenant-cardinality histograms.
+                # Avoid tenant-cardinality histograms on the TTFT hot path.
                 ("provider", "model"),
                 registry=registry,
             ),
             overhead=Histogram(
                 "tidegate_gateway_overhead_seconds",
                 "Gateway overhead before dispatching upstream",
-                # REWORK-M0-1: contract defines gateway overhead as unlabeled pre-upstream SLI.
+                # Gateway overhead is an unlabeled pre-upstream SLI.
                 (),
                 registry=registry,
             ),
             upstream_aborted=Counter(
                 "tidegate_upstream_aborted",
                 "Upstream streams aborted by the gateway",
-                # REWORK-M0-1: contract labels are provider and reason.
+                # Provider and reason keep abort labels useful without high cardinality.
                 ("provider", "reason"),
                 registry=registry,
             ),
@@ -144,5 +144,5 @@ class Metrics:
         )
 
     def render(self) -> tuple[bytes, str]:
-        # REWORK-M0-2: generate_latest emits classic Prometheus text format.
+        # generate_latest emits classic Prometheus text format.
         return generate_latest(self.registry), CONTENT_TYPE_LATEST

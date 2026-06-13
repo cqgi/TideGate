@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class FrozenModel(BaseModel):
-    # REWORK-M0-5: gateway config typos must fail validation instead of being ignored.
+    # Gateway config typos must fail validation instead of being ignored.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
@@ -212,7 +212,7 @@ class GatewayConfig(FrozenModel):
     providers: dict[str, ProviderConfig]
     model_groups: dict[str, ModelGroupConfig]
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
-    # REWORK-M0-5: reserve full contract schema sections even before later milestones use them.
+    # Keep full config sections present even when a deployment leaves them at defaults.
     policies: dict[str, PolicyConfig] = Field(default_factory=dict)
     quota_plans: dict[str, QuotaPlanConfig] = Field(default_factory=dict)
     cache: CacheConfig = Field(default_factory=CacheConfig)

@@ -98,8 +98,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 def _chat(client: httpx.Client, gateway_url: str, api_key: str) -> httpx.Response:
-    # DECISION: REWORK-M4-3 keeps chaos numbers about routing, not cache hits; unique
-    # prompts preserve L1/L2 isolation without requiring a special tenant.
+    # Keep chaos numbers about routing, not cache hits; unique prompts preserve cache
+    # isolation without requiring a special tenant.
     prompt = f"hi chaos {time.monotonic_ns()}"
     return client.post(
         f"{gateway_url}/v1/chat/completions",

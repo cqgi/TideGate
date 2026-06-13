@@ -39,7 +39,7 @@ async def reload_config(request: Request) -> JSONResponse:
     try:
         version = await publish_reload(request.app.state.redis)
     except redis.RedisError:
-        # DECISION: local admin reload remains useful when Redis broadcast bus is unavailable.
+        # Local admin reload remains useful when the Redis broadcast bus is unavailable.
         version = request.app.state.config_holder.version + 1
     request.app.state.config_holder.replace(
         request.app.state.config_holder.current, version=version

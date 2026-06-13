@@ -56,7 +56,6 @@ class DummyProviderManager:
 
 @pytest.mark.asyncio
 async def test_publish_reload_increments_and_publishes() -> None:
-    """SPEC-M1-4."""
     redis = FakeRedis()
     version = await publish_reload(redis)  # type: ignore[arg-type]
     assert version == 1
@@ -66,7 +65,6 @@ async def test_publish_reload_increments_and_publishes() -> None:
 
 @pytest.mark.asyncio
 async def test_poll_config_version_applies_new_version(poll_config_path: Path) -> None:
-    """SPEC-M1-4."""
     holder = ConfigHolder(load_config(poll_config_path), poll_config_path)
     redis = FakeRedis()
     redis.values[CFG_VERSION_KEY] = b"1"
@@ -92,7 +90,6 @@ async def test_poll_config_version_applies_new_version(poll_config_path: Path) -
 
 @pytest.mark.asyncio
 async def test_poll_config_version_recovers_after_redis_error(poll_config_path: Path) -> None:
-    """REWORK-M1-5."""
     holder = ConfigHolder(load_config(poll_config_path), poll_config_path)
     redis = FlakyRedis()
     redis.values[CFG_VERSION_KEY] = b"1"

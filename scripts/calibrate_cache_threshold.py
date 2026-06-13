@@ -259,7 +259,7 @@ def _select(rows: list[ScanRow], *, max_false_hit: float) -> ScanRow:
     eligible = [row for row in rows if row.fpr <= max_false_hit]
     if not eligible:
         raise SystemExit(f"no threshold satisfies false hit <= {max_false_hit:.4f}")
-    # DECISION: choose the highest recall, then the higher threshold to reduce tie risk.
+    # Prefer the highest recall, then the higher threshold to reduce tie risk.
     return max(eligible, key=lambda row: (row.recall, row.tau))
 
 

@@ -25,7 +25,7 @@ async def prewarm_from_aggregate(
     *,
     now_s: float,
 ) -> None:
-    # SPEC-M3-5: aggregation is dashboard/prewarm data only, never the hot-path source of truth.
+    # Aggregation is dashboard and prewarm data only, never the hot-path source of truth.
     for deployment in _deployments(settings):
         key = _cb_key(deployment)
         try:

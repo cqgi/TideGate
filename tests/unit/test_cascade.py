@@ -14,7 +14,6 @@ from tidegate.routing.cascade import cascade_decision, draft_accepted, force_log
 
 
 def test_cascade_bypasses_stream_and_tools() -> None:
-    """SPEC-M5-2."""
     policy = PolicyConfig(cascade=CascadeConfig(enabled=True, draft_model_group="chat-small"))
     settings = _settings()
 
@@ -23,7 +22,6 @@ def test_cascade_bypasses_stream_and_tools() -> None:
 
 
 def test_cascade_enables_non_stream_draft_group_and_forces_logprobs() -> None:
-    """SPEC-M5-2."""
     policy = PolicyConfig(cascade=CascadeConfig(enabled=True, draft_model_group="chat-small"))
     decision = cascade_decision(_request(), policy, _settings())
     draft_req = force_logprobs(_request())
@@ -35,7 +33,6 @@ def test_cascade_enables_non_stream_draft_group_and_forces_logprobs() -> None:
 
 
 def test_draft_acceptance_uses_mean_logprob_threshold() -> None:
-    """SPEC-M5-2."""
     cascade = CascadeConfig(enabled=True, threshold=-0.45)
 
     assert draft_accepted(_response(-0.3), cascade)

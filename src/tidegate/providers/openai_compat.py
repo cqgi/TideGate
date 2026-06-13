@@ -24,7 +24,7 @@ class OpenAICompatibleProvider:
         self.name = name
         self._config = config
         limits = httpx.Limits(max_connections=config.max_connections)
-        # SPEC-M1-3: provider instance has an independent pool and ignores proxy env for localhost.
+        # Provider instances use independent pools and ignore proxy env for localhost.
         self._client = httpx.AsyncClient(limits=limits, trust_env=False)
         self._api_key = api_key_from_env(config.api_key_env)
 
@@ -37,7 +37,7 @@ class OpenAICompatibleProvider:
         upstream_model: str,
         deadline: Deadline,
     ) -> UnifiedResponse:
-        # SPEC-M0-4: pass through the OpenAI request body with only model rewritten.
+        # Pass through the OpenAI request body with only the model rewritten.
         body, headers = self._upstream_payload(req, upstream_model)
         body["stream"] = False
         try:
@@ -49,7 +49,7 @@ class OpenAICompatibleProvider:
                     timeout=_non_stream_timeout(deadline),
                 )
         except httpx.ConnectTimeout as exc:
-            # REWORK-M0-3: connect timeout is a retryable connection failure.
+            # Connect timeout is a retryable connection failure.
             raise GatewayError(
                 "upstream connection timed out", ErrorCategory.RETRYABLE_UPSTREAM
             ) from exc
@@ -77,7 +77,7 @@ class OpenAICompatibleProvider:
         upstream_model: str,
         deadline: Deadline,
     ) -> AsyncIterator[UnifiedDelta]:
-        # SPEC-M0-4: keep httpx stream context around the full generator for cancellation.
+        # Keep the httpx stream context around the full generator for cancellation.
         body, headers = self._upstream_payload(req, upstream_model)
         body["stream"] = True
         try:
@@ -97,7 +97,7 @@ class OpenAICompatibleProvider:
                             if first_content:
                                 line = await anext(line_iter)
                             else:
-                                # SPEC-M1-1: TTFT is request dispatch until first content delta.
+                                # TTFT is request dispatch until the first content delta.
                                 async with asyncio.timeout(deadline.ttft_s):
                                     line = await anext(line_iter)
                         except StopAsyncIteration:
@@ -119,7 +119,7 @@ class OpenAICompatibleProvider:
                             first_content = True
                         yield delta
         except httpx.ConnectTimeout as exc:
-            # REWORK-M0-3: connect timeout is a retryable connection failure.
+            # Connect timeout is a retryable connection failure.
             raise GatewayError(
                 "upstream connection timed out", ErrorCategory.RETRYABLE_UPSTREAM
             ) from exc
@@ -144,7 +144,7 @@ class OpenAICompatibleProvider:
         body = dict(req.raw_body)
         body["model"] = upstream_model
         headers = {"Authorization": f"Bearer {self._api_key}"}
-        # DECISION: M0 forwards mock directives for deterministic integration tests.
+        # Forward mock directives for deterministic integration tests.
         mock_directive = body.pop(_MOCK_DIRECTIVE_BODY_KEY, None)
         if isinstance(mock_directive, str):
             headers["x-mock-directive"] = mock_directive
@@ -161,8 +161,8 @@ def _stream_timeout(deadline: Deadline) -> httpx.Timeout:
 
 
 def _non_stream_timeout(deadline: Deadline) -> httpx.Timeout:
-    # DECISION: REWORK-M1-3 leaves non-stream response reads governed by the total
-    # deadline, because a valid long answer arrives as one completed response body.
+    # Non-stream response reads use the total deadline because a valid long answer
+    # arrives as one completed response body.
     return httpx.Timeout(
         connect=deadline.connect_s,
         read=None,
@@ -196,7 +196,7 @@ def _parse_retry_after(value: str | None) -> float | None:
         try:
             parsed = parsedate_to_datetime(value)
         except (TypeError, ValueError):
-            # REWORK-M0-3: invalid Retry-After values are ignored, not leaked as ValueError.
+            # Invalid Retry-After values are ignored, not leaked as ValueError.
             return None
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=UTC)
@@ -249,7 +249,7 @@ def _parse_sse_line(line: str) -> UnifiedDelta | None:
     try:
         payload = json.loads(data)
     except json.JSONDecodeError as exc:
-        # REWORK-M0-3: bad upstream SSE JSON is an upstream protocol error.
+        # Bad upstream SSE JSON is an upstream protocol error.
         raise GatewayError("invalid upstream SSE", ErrorCategory.RETRYABLE_UPSTREAM) from exc
     choices = payload.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else None

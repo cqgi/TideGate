@@ -16,7 +16,6 @@ async def _slow_delta() -> AsyncIterator[UnifiedDelta]:
 
 @pytest.mark.asyncio
 async def test_with_heartbeats_emits_idle_marker() -> None:
-    """SPEC-M0-5."""
     events = []
     async for event in with_heartbeats(_slow_delta(), 0.01):
         events.append(event)
@@ -25,7 +24,6 @@ async def test_with_heartbeats_emits_idle_marker() -> None:
 
 
 def test_stream_chunk_payload_usage_gate() -> None:
-    """REWORK-M0-6."""
     delta = UnifiedDelta(usage=Usage(prompt_tokens=1, completion_tokens=2, total_tokens=3))
     assert stream_chunk_payload("req", "chat-large", delta, include_usage=False) is None
     payload = stream_chunk_payload("req", "chat-large", delta, include_usage=True)

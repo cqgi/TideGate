@@ -25,7 +25,6 @@ def test_cascade_accepts_high_confidence_draft(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-2."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -55,7 +54,6 @@ def test_cascade_escalates_low_confidence_draft(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-2."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -85,7 +83,6 @@ def test_cascade_bypasses_stream_requests(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M5-2."""
     del mock_a_proc, mock_b_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)

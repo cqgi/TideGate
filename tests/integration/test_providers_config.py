@@ -25,7 +25,6 @@ from tests.integration.conftest import (
 
 @pytest.mark.integration
 def test_models_requires_bearer_and_lists_groups(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M1-3."""
     del gateway_proc
     with httpx.Client(timeout=2, trust_env=False) as client:
         unauthorized = client.get(f"{BASE_URL}/v1/models")
@@ -40,7 +39,6 @@ def test_models_requires_bearer_and_lists_groups(gateway_proc: subprocess.Popen[
 
 @pytest.mark.integration
 def test_ttft_timeout_switches_to_next_deployment(gateway_proc: subprocess.Popen[str]) -> None:
-    """SPEC-M1-2."""
     del gateway_proc
     reset_mock(MOCK_A_URL)
     reset_mock(MOCK_B_URL)
@@ -63,7 +61,6 @@ def test_ttft_timeout_switches_to_next_deployment(gateway_proc: subprocess.Popen
 def test_stream_drop_after_bytes_finishes_with_error_chunk(
     gateway_proc: subprocess.Popen[str],
 ) -> None:
-    """SPEC-M1-1."""
     del gateway_proc
     directive = {
         "ttft_ms": 10,
@@ -101,7 +98,6 @@ def test_stream_drop_after_bytes_finishes_with_error_chunk(
 def test_stream_exhausted_providers_is_in_band_error_and_non_stream_is_502(
     tmp_path: Path,
 ) -> None:
-    """REWORK-M1-2."""
     config_path = tmp_path / "gateway.yaml"
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
     raw["server"]["port"] = 8011
@@ -143,7 +139,6 @@ def test_non_stream_allows_body_slower_than_inter_chunk(
     mock_a_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """REWORK-M1-3."""
     del mock_a_proc
     config_path = tmp_path / "gateway.yaml"
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))
@@ -180,7 +175,6 @@ def test_config_poll_recovers_after_redis_restart(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """REWORK-M1-5."""
     del redis_stack_proc, mock_a_proc, mock_b_proc
     redis_client = redis.Redis.from_url("redis://127.0.0.1:6379/0")
     redis_client.delete("cfg:version")
@@ -234,7 +228,6 @@ def test_local_admin_reload_rolls_back_and_auth_cache_invalidates(
     mock_b_proc: subprocess.Popen[str],
     tmp_path: Path,
 ) -> None:
-    """SPEC-M1-4."""
     del mock_a_proc, mock_b_proc
     config_path = tmp_path / "gateway.yaml"
     raw = yaml.safe_load(Path("tests/fixtures/gateway-test.yaml").read_text(encoding="utf-8"))

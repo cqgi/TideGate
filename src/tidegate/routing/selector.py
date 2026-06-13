@@ -25,8 +25,8 @@ class P2CSelector:
         *,
         now_s: float,
     ) -> DeploymentConfig:
-        # SPEC-M3-3: candidate checks are side-effect free; dispatch records the
-        # HALF_OPEN probe only after quota reservation succeeds.
+        # Candidate checks are side-effect free; dispatch records the HALF_OPEN probe
+        # only after quota reservation succeeds.
         candidates = [
             deployment
             for deployment in group.deployments

@@ -30,7 +30,6 @@ from tidegate.routing.stats import RoutingState
 
 
 def test_stale_cache_result_is_degraded_outcome() -> None:
-    """SPEC-M4-7."""
     result = routes._ChatResult(_response(), "cache", "hit-semantic", "stale-cache")
 
     assert routes._outcome_for(result) == "degraded"
@@ -38,7 +37,6 @@ def test_stale_cache_result_is_degraded_outcome() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_heartbeat_does_not_block_ttft_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """REWORK-M1-1 and REWORK-M1-4."""
     settings = _settings_for_stream_tests()
     request = _fake_request(
         settings,
@@ -75,7 +73,6 @@ async def test_stream_heartbeat_does_not_block_ttft_retry(monkeypatch: pytest.Mo
 async def test_stream_retry_exhaustion_returns_error_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """REWORK-M1-2."""
     settings = _settings_for_stream_tests()
     request = _fake_request(
         settings,

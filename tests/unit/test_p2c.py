@@ -9,7 +9,6 @@ from tidegate.routing.stats import RoutingState
 
 
 def test_p2c_excludes_open_breaker() -> None:
-    """SPEC-M3-3."""
     settings = load_config("tests/fixtures/gateway-test.yaml")
     state = RoutingState(settings)
     group = settings.model_groups["chat-large"]
@@ -31,7 +30,6 @@ def test_p2c_excludes_open_breaker() -> None:
 
 
 def test_p2c_prefers_lower_score(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SPEC-M3-3."""
     settings = load_config("tests/fixtures/gateway-test.yaml")
     state = RoutingState(settings)
     group = settings.model_groups["chat-large"]
@@ -47,7 +45,6 @@ def test_p2c_prefers_lower_score(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_p2c_empty_candidates_raises() -> None:
-    """SPEC-M3-3."""
     settings = load_config("tests/fixtures/gateway-test.yaml")
     state = RoutingState(settings)
     group = settings.model_groups["chat-large"]

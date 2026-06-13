@@ -216,9 +216,9 @@ class CacheService:
                 usable = await self._responses_for_candidates(candidates, stale=stale)
                 if not usable:
                     return None
-                # DECISION: SPEC-F diagnostics showed positive p50=0.796 and negative
-                # p90=0.857 for bge-small-zh-v1.5, so cosine only gates recall; reranker
-                # owns false-hit budget even though calibrated recall remains data-bound.
+                # Diagnostics showed positive p50=0.796 and negative p90=0.857 for
+                # bge-small-zh-v1.5, so cosine only gates recall; the reranker owns the
+                # false-hit budget even though calibrated recall remains data-bound.
                 pairs = [(query_text, hit.text) for hit, _ in usable]
                 rerank_scores = await self._embedding.rerank(pairs)
                 return _best_reranked_hit(
@@ -245,8 +245,8 @@ def _best_reranked_hit(
     if not scored:
         return None
     score, hit, response = max(scored, key=lambda item: item[0])
-    # DECISION: SPEC-F-2 moves tenant operating points from bi-encoder cosine to
-    # reranker score; recall_threshold stays wide and only gates candidates into rerank.
+    # Tenant operating points use reranker score; recall_threshold stays wide and only
+    # gates candidates into rerank.
     if score < threshold:
         return None
     return SemanticHit(
@@ -260,9 +260,9 @@ def _tenant_l2_threshold(tenant: TenantConfig, settings: GatewayConfig) -> float
         return settings.cache.l2.similarity_threshold
     selected_name = tenant.cache.l2_operating_point
     if selected_name is None:
-        # DECISION: REWORK-M4-2 defaults to the most conservative point because small
-        # embeddings showed weak recall at 1% FPR; false-hit budget is a tenant business
-        # decision, so the gateway exposes calibrated curve points instead of one global tau.
+        # Default to the most conservative point because small embeddings showed weak
+        # recall at 1% FPR; false-hit budget is a tenant business decision, so the
+        # gateway exposes calibrated curve points instead of one global tau.
         return max(points, key=lambda point: point.tau).tau
     for point in points:
         if point.name == selected_name:
