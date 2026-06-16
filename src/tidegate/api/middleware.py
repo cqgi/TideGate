@@ -30,6 +30,8 @@ class _AuthCache:
         self._capacity = capacity
         self._ttl_s = ttl_s
         self._entries: OrderedDict[str, _AuthEntry] = OrderedDict()
+        self._keys_by_tenant: dict[str, set[str]] = {}
+        self._tenant_by_key: dict[str, str] = {}
 
     def get(self, key_hash: str) -> TenantConfig | None:
         now = time.monotonic()
@@ -37,18 +39,41 @@ class _AuthCache:
         if entry is None:
             return None
         if entry.expires_at <= now:
-            self._entries.pop(key_hash, None)
+            self._remove(key_hash)
             return None
         self._entries.move_to_end(key_hash)
         return entry.tenant
 
     def put(self, key_hash: str, tenant: TenantConfig) -> None:
+        self._remove(key_hash)
         self._entries[key_hash] = _AuthEntry(
             tenant=tenant, expires_at=time.monotonic() + self._ttl_s
         )
+        self._keys_by_tenant.setdefault(tenant.id, set()).add(key_hash)
+        self._tenant_by_key[key_hash] = tenant.id
         self._entries.move_to_end(key_hash)
         while len(self._entries) > self._capacity:
-            self._entries.popitem(last=False)
+            evicted_key, _ = self._entries.popitem(last=False)
+            self._remove_index(evicted_key)
+
+    def invalidate_tenant(self, tenant_id: str) -> None:
+        for key_hash in tuple(self._keys_by_tenant.get(tenant_id, ())):
+            self._remove(key_hash)
+
+    def _remove(self, key_hash: str) -> None:
+        self._entries.pop(key_hash, None)
+        self._remove_index(key_hash)
+
+    def _remove_index(self, key_hash: str) -> None:
+        tenant_id = self._tenant_by_key.pop(key_hash, None)
+        if tenant_id is None:
+            return
+        keys = self._keys_by_tenant.get(tenant_id)
+        if keys is None:
+            return
+        keys.discard(key_hash)
+        if not keys:
+            self._keys_by_tenant.pop(tenant_id, None)
 
 
 class RequestContextMiddleware:
@@ -89,6 +114,8 @@ class AuthMiddleware:
             config_auth.auth_cache_ttl_s,
         )
         self._cache_version = config.version
+        self._cache_settings = (config_auth.auth_cache_size, config_auth.auth_cache_ttl_s)
+        self._tenant_fingerprints = _tenant_fingerprints(config.current.tenants)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         data_paths = {"/v1/chat/completions", "/v1/models", "/v1/cache/feedback"}
@@ -130,8 +157,20 @@ class AuthMiddleware:
         if self._cache_version == self._config.version:
             return
         current = self._config.current.server
-        # Tenant reloads invalidate cached auth decisions immediately.
-        self._cache = _AuthCache(current.auth_cache_size, current.auth_cache_ttl_s)
+        next_cache_settings = (current.auth_cache_size, current.auth_cache_ttl_s)
+        next_fingerprints = _tenant_fingerprints(self._config.current.tenants)
+        if next_cache_settings != self._cache_settings:
+            self._cache = _AuthCache(current.auth_cache_size, current.auth_cache_ttl_s)
+            self._cache_settings = next_cache_settings
+        else:
+            changed_tenant_ids = {
+                tenant_id
+                for tenant_id, fingerprint in self._tenant_fingerprints.items()
+                if next_fingerprints.get(tenant_id) != fingerprint
+            }
+            for tenant_id in changed_tenant_ids:
+                self._cache.invalidate_tenant(tenant_id)
+        self._tenant_fingerprints = next_fingerprints
         self._cache_version = self._config.version
 
     def _find_tenant(self, key_hash: str) -> TenantConfig | None:
@@ -174,3 +213,15 @@ def _scope_state(scope: Scope) -> dict[str, Any]:
         state = {}
         scope["state"] = state
     return state
+
+
+def _tenant_fingerprints(tenants: tuple[TenantConfig, ...]) -> dict[str, tuple[str, str, str, str]]:
+    return {
+        tenant.id: (
+            tenant.api_key_sha256,
+            tenant.plan,
+            tenant.policy,
+            tenant.cache.model_dump_json(),
+        )
+        for tenant in tenants
+    }
