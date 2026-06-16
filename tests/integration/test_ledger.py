@@ -26,7 +26,10 @@ from tidegate.core.models import Usage
 from tidegate.obs.metrics import Metrics
 from tidegate.settlement import LedgerBatcher, LedgerRecord
 
-PG_DSN = "postgresql://tidegate:tidegate@127.0.0.1:5432/tidegate"
+PG_DSN = os.environ.get(
+    "TIDEGATE_TEST_PG_DSN",
+    "postgresql://tidegate:tidegate@127.0.0.1:5432/tidegate",
+)
 
 
 @pytest.mark.integration

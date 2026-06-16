@@ -24,7 +24,8 @@ from tidegate.cache.l2 import L2Cache, capacity_sweep_loop
 from tidegate.cache.service import CacheService
 from tidegate.config.holder import ConfigHolder
 from tidegate.config.models import GatewayConfig
-from tidegate.config.reloader import poll_config_version, watch_config_events
+from tidegate.config.reloader import merge_tenants, poll_config_version, watch_config_events
+from tidegate.config.tenant_store import TenantStore
 from tidegate.obs.logging import configure_logging
 from tidegate.obs.loop_lag import probe_loop_lag
 from tidegate.obs.metrics import Metrics
@@ -103,21 +104,48 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         embedding_pool: ProcessPoolExecutor | None = None
         embedding_service: EmbeddingService | None = None
         pg_pool: asyncpg.Pool | None = None
-        if any(tenant.cache.l2 for tenant in settings.tenants):
+        tenant_store = TenantStore(None)
+        dsn = os.environ.get(settings.postgres.dsn_env)
+        if dsn:
+            try:
+                pg_pool = await asyncpg.create_pool(dsn)
+                ddl = await asyncio.to_thread(_ledger_schema_sql)
+                async with pg_pool.acquire() as conn:
+                    await conn.execute(ddl)
+                tenant_store = TenantStore(pg_pool)
+                await tenant_store.ensure_schema()
+                await tenant_store.seed_from_yaml(holder.current.tenants)
+                db_tenants = await tenant_store.load_all()
+                if db_tenants is not None:
+                    holder.replace(
+                        merge_tenants(holder.current, db_tenants),
+                        version=holder.version,
+                    )
+            except (OSError, asyncpg.PostgresError) as exc:
+                structlog.get_logger().warning(
+                    "postgres_unavailable_ledger_disabled",
+                    error=str(exc),
+                )
+                if pg_pool is not None:
+                    await pg_pool.close()
+                pg_pool = None
+                tenant_store = TenantStore(None)
+        current = holder.current
+        if any(tenant.cache.l2 for tenant in current.tenants):
             embedding_pool = ProcessPoolExecutor(
-                max_workers=settings.cache.l2.embed_pool_workers,
+                max_workers=current.cache.l2.embed_pool_workers,
                 initializer=init_embedding_worker,
                 initargs=(
-                    settings.cache.l2.embedding_model,
-                    settings.cache.l2.model_cache_dir,
-                    settings.cache.l2.hf_endpoint,
-                    settings.cache.l2.reranker_model,
+                    current.cache.l2.embedding_model,
+                    current.cache.l2.model_cache_dir,
+                    current.cache.l2.hf_endpoint,
+                    current.cache.l2.reranker_model,
                 ),
             )
             embedding_service = EmbeddingService(embedding_pool)
         quota_scripts = QuotaScripts(redis_client)
-        routing_state = RoutingState(settings, metrics)
-        selector = P2CSelector(settings, routing_state)
+        routing_state = RoutingState(current, metrics)
+        selector = P2CSelector(current, routing_state)
         l2_cache = L2Cache(redis_client)
         cache_service = CacheService(
             L1Cache(redis_client),
@@ -132,31 +160,18 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             LocalFallbackLimiter(),
             metrics,
         )
-        dsn = os.environ.get(settings.postgres.dsn_env)
-        if dsn:
-            try:
-                pg_pool = await asyncpg.create_pool(dsn)
-                ddl = await asyncio.to_thread(_ledger_schema_sql)
-                async with pg_pool.acquire() as conn:
-                    await conn.execute(ddl)
-            except (OSError, asyncpg.PostgresError) as exc:
-                structlog.get_logger().warning(
-                    "postgres_unavailable_ledger_disabled",
-                    error=str(exc),
-                )
-                if pg_pool is not None:
-                    await pg_pool.close()
-                pg_pool = None
-        ledger = LedgerBatcher(pg_pool, settings.settlement, metrics)
+        ledger = LedgerBatcher(pg_pool, current.settlement, metrics)
         app.state.config_holder = holder
         app.state.metrics = metrics
         app.state.provider_manager = provider_manager
         app.state.task_registry = task_registry
         app.state.active_streams = ActiveStreamTracker()
         app.state.redis = redis_client
+        app.state.tenant_store = tenant_store
         app.state.quota = quota_service
         app.state.cpu_pool = cpu_pool
         app.state.embedding_pool = embedding_pool
+        app.state.embedding_service = embedding_service
         app.state.cache = cache_service
         app.state.ledger = ledger
         app.state.routing_state = routing_state

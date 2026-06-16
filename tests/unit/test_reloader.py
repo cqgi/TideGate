@@ -10,9 +10,13 @@ import redis.asyncio as redis
 
 from tidegate.config.holder import ConfigHolder
 from tidegate.config.loader import load_config
+from tidegate.config.models import CacheToggleConfig, TenantConfig
 from tidegate.config.reloader import (
     CFG_EVENTS_CHANNEL,
     CFG_VERSION_KEY,
+    _watch_config_events_once,
+    apply_reload,
+    merge_tenants,
     poll_config_version,
     publish_reload,
 )
@@ -48,10 +52,60 @@ class FlakyRedis(FakeRedis):
         return await super().get(key)
 
 
+class EventRedis(FakeRedis):
+    def __init__(self, messages: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.pubsub_client = FakePubSub(messages)
+
+    def pubsub(self) -> FakePubSub:
+        return self.pubsub_client
+
+
+class FakePubSub:
+    def __init__(self, messages: list[dict[str, object]]) -> None:
+        self.messages = messages
+        self.subscribed: list[str] = []
+        self.unsubscribed: list[str] = []
+        self.closed = False
+
+    async def subscribe(self, channel: str) -> None:
+        self.subscribed.append(channel)
+
+    async def listen(self) -> Any:
+        for message in self.messages:
+            yield message
+
+    async def unsubscribe(self, channel: str) -> None:
+        self.unsubscribed.append(channel)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class DummyProviderManager:
+    def __init__(self) -> None:
+        self.previous: object | None = None
+        self.current: object | None = None
+
     def rebuild_if_needed(self, previous: object, current: object) -> list[Any]:
-        del previous, current
+        self.previous = previous
+        self.current = current
         return []
+
+
+class DummyTenantStore:
+    def __init__(self, tenants: tuple[TenantConfig, ...] | None) -> None:
+        self.tenants = tenants
+        self.loads = 0
+
+    async def load_all(self) -> tuple[TenantConfig, ...] | None:
+        self.loads += 1
+        return self.tenants
+
+
+class FailingTenantStore:
+    async def load_all(self) -> tuple[TenantConfig, ...] | None:
+        raise ValueError("db tenant load failed")
 
 
 @pytest.mark.asyncio
@@ -86,6 +140,112 @@ async def test_poll_config_version_applies_new_version(poll_config_path: Path) -
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def test_merge_tenants_replaces_only_tenant_tuple() -> None:
+    base = load_config("tests/fixtures/gateway-test.yaml")
+    tenant = TenantConfig(
+        id="db-demo",
+        api_key_sha256="db-key",
+        plan="free",
+        policy="default",
+        cache=CacheToggleConfig(l1=False, l2=False),
+    )
+
+    merged = merge_tenants(base, (tenant,))
+
+    assert merged.tenants == (tenant,)
+    assert merged.providers == base.providers
+    assert merged.model_groups == base.model_groups
+    assert merged is not base
+
+
+@pytest.mark.asyncio
+async def test_apply_reload_merges_db_tenants_after_yaml_reload(poll_config_path: Path) -> None:
+    holder = ConfigHolder(load_config(poll_config_path), poll_config_path)
+    db_tenant = TenantConfig(
+        id="db-demo",
+        api_key_sha256="db-key",
+        plan="free",
+        policy="default",
+        cache=CacheToggleConfig(l1=False, l2=False),
+    )
+    manager = DummyProviderManager()
+    store = DummyTenantStore((db_tenant,))
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            config_holder=holder,
+            provider_manager=manager,
+            tenant_store=store,
+            task_registry=SimpleNamespace(create=lambda *args, **kwargs: None),
+        )
+    )
+
+    result = await apply_reload(app, version=2)  # type: ignore[arg-type]
+
+    assert result.ok
+    assert holder.version == 2
+    assert holder.current.tenants == (db_tenant,)
+    assert store.loads == 1
+    assert manager.previous is not None
+    assert manager.current == holder.current
+
+
+@pytest.mark.asyncio
+async def test_apply_reload_keeps_previous_snapshot_when_db_tenant_load_fails(
+    poll_config_path: Path,
+) -> None:
+    holder = ConfigHolder(load_config(poll_config_path), poll_config_path)
+    previous = holder.current
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            config_holder=holder,
+            provider_manager=DummyProviderManager(),
+            tenant_store=FailingTenantStore(),
+            task_registry=SimpleNamespace(create=lambda *args, **kwargs: None),
+        )
+    )
+
+    result = await apply_reload(app, version=3)  # type: ignore[arg-type]
+
+    assert not result.ok
+    assert result.version == 0
+    assert "db tenant load failed" in str(result.error)
+    assert holder.current is previous
+    assert holder.version == 0
+
+
+@pytest.mark.asyncio
+async def test_config_event_reloads_db_tenants_through_existing_channel(
+    poll_config_path: Path,
+) -> None:
+    holder = ConfigHolder(load_config(poll_config_path), poll_config_path)
+    db_tenant = TenantConfig(
+        id="db-demo",
+        api_key_sha256="db-key",
+        plan="free",
+        policy="default",
+        cache=CacheToggleConfig(l1=False, l2=False),
+    )
+    manager = DummyProviderManager()
+    store = DummyTenantStore((db_tenant,))
+    redis = EventRedis([{"type": "message", "data": b"7"}])
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            config_holder=holder,
+            provider_manager=manager,
+            tenant_store=store,
+            task_registry=SimpleNamespace(create=lambda *args, **kwargs: None),
+        )
+    )
+
+    await _watch_config_events_once(app, redis)  # type: ignore[arg-type]
+
+    assert holder.version == 7
+    assert holder.current.tenants == (db_tenant,)
+    assert redis.pubsub_client.subscribed == [CFG_EVENTS_CHANNEL]
+    assert redis.pubsub_client.unsubscribed == [CFG_EVENTS_CHANNEL]
+    assert redis.pubsub_client.closed
 
 
 @pytest.mark.asyncio

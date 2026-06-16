@@ -4,7 +4,7 @@ UV ?= uv
 RUN ?= $(UV) run --extra dev --extra test
 PYTHON ?= $(RUN) python
 RUFF ?= $(RUN) ruff
-MYPY ?= $(RUN) mypy
+MYPY ?= $(PYTHON) -m mypy
 PYTEST ?= $(RUN) pytest
 
 dev:

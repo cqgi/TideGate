@@ -10,4 +10,4 @@ services:
       POSTGRES_PASSWORD: tidegate
       POSTGRES_DB: tidegate
     ports:
-      - "5432:5432"
+      - "${TIDEGATE_PG_PORT:-5432}:5432"

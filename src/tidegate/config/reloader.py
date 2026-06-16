@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+import asyncpg
 import redis.asyncio as redis
 import structlog
 from fastapi import FastAPI
+from pydantic import ValidationError
 
 from tidegate.config.holder import ReloadResult
-from tidegate.config.models import GatewayConfig
+from tidegate.config.loader import load_config
+from tidegate.config.models import GatewayConfig, TenantConfig
+from tidegate.config.tenant_store import TenantStore
 from tidegate.providers.manager import close_later
 
 CFG_VERSION_KEY = "cfg:version"
@@ -18,9 +22,16 @@ CFG_EVENTS_CHANNEL = "cfg:events"
 async def apply_reload(app: FastAPI, *, version: int | None = None) -> ReloadResult:
     holder = app.state.config_holder
     previous: GatewayConfig = holder.current
-    result: ReloadResult = holder.reload(version)
-    if not result.ok:
-        return result
+    try:
+        next_config = load_config(holder.path)
+        store: TenantStore | None = getattr(app.state, "tenant_store", None)
+        if store is not None:
+            db_tenants = await store.load_all()
+            if db_tenants is not None:
+                next_config = merge_tenants(next_config, db_tenants)
+    except (OSError, ValueError, ValidationError, asyncpg.PostgresError) as exc:
+        return ReloadResult(ok=False, version=holder.version, error=str(exc))
+    holder.replace(next_config, version=version)
     manager = app.state.provider_manager
     old_providers = manager.rebuild_if_needed(previous, holder.current)
     if old_providers:
@@ -28,7 +39,11 @@ async def apply_reload(app: FastAPI, *, version: int | None = None) -> ReloadRes
             close_later(old_providers, previous.server.provider_pool_drain_s),
             name="tidegate-provider-drain",
         )
-    return result
+    return ReloadResult(ok=True, version=holder.version)
+
+
+def merge_tenants(base: GatewayConfig, tenants: tuple[TenantConfig, ...]) -> GatewayConfig:
+    return base.model_copy(update={"tenants": tenants})
 
 
 async def publish_reload(redis_client: redis.Redis) -> int:
