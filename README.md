@@ -2,31 +2,7 @@
 
 TideGate is an OpenAI-compatible gateway for routing and accounting LLM chat-completion traffic. It sits between SDK clients and a small provider pool, then handles quota admission, streaming proxying, cache lookup, provider selection, hedging, and usage settlement.
 
-```
-OpenAI SDK / curl
-        |
-        |  POST /v1/chat/completions
-        v
-+----------------------- TideGate -----------------------+
-|  FastAPI edge                                           |
-|  - request id, auth, OpenAI-compatible errors, SSE       |
-|                         |                               |
-|  Quota admission        |  Redis Lua token buckets       |
-|  - RPM / TPM / streams / monthly budget                 |
-|                         |                               |
-|  Cache                  |  L1 exact -> L2 semantic       |
-|  - replay cached answers as SSE when the client streams |
-|                         |                               |
-|  Router                 |  P2C, local breakers, fallback |
-|  - hedge slow streams, cascade cheap drafts when useful |
-|                         |                               |
-|  Provider adapters      |  httpx streaming clients       |
-+-------------+----------------------------+--------------+
-              |                            |
-              v                            v
-        Redis Stack                  PostgreSQL
-        quota/cache/routing state     usage ledger
-```
+![TideGate architecture](assets/tidegate-architecture.png)
 
 ## Core Components
 
