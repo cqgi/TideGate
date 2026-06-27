@@ -11,7 +11,7 @@ from fastapi import Request
 
 import tidegate.api.routes as routes
 from tidegate.config.loader import load_config
-from tidegate.config.models import DeploymentConfig, GatewayConfig
+from tidegate.config.models import CacheConfig, DeploymentConfig, GatewayConfig
 from tidegate.core.deadline import Deadline
 from tidegate.core.errors import ErrorCategory, GatewayError
 from tidegate.core.models import (
@@ -33,6 +33,36 @@ def test_stale_cache_result_is_degraded_outcome() -> None:
     result = routes._ChatResult(_response(), "cache", "hit-semantic", "stale-cache")
 
     assert routes._outcome_for(result) == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_singleflight_wait_timeout_keeps_fallback_budget() -> None:
+    settings = _settings_for_stream_tests().model_copy(
+        update={
+            "cache": CacheConfig(
+                singleflight_wait_timeout_ms=300,
+                singleflight_fallback_margin_ms=50,
+            )
+        }
+    )
+    loop = asyncio.get_running_loop()
+    deadline = Deadline(
+        connect_s=1.0,
+        ttft_s=1.0,
+        inter_chunk_s=1.0,
+        total_deadline=loop.time() + 1.0,
+    )
+
+    assert routes._singleflight_wait_timeout(settings, deadline) == pytest.approx(0.3)
+
+    deadline = Deadline(
+        connect_s=1.0,
+        ttft_s=1.0,
+        inter_chunk_s=1.0,
+        total_deadline=loop.time() + 0.08,
+    )
+
+    assert routes._singleflight_wait_timeout(settings, deadline) == pytest.approx(0.03, abs=0.01)
 
 
 @pytest.mark.asyncio

@@ -196,7 +196,7 @@ async def chat_completions(request: Request) -> Response:
                 try:
                     response = await asyncio.wait_for(
                         asyncio.shield(flight.future),
-                        timeout=deadline.remaining(),
+                        timeout=_singleflight_wait_timeout(settings, deadline),
                     )
                     await quota_settle.refund_full()
                     return DisconnectAwareStreamingResponse(
@@ -881,7 +881,7 @@ async def _call_non_stream_with_retries(
         try:
             response = await asyncio.wait_for(
                 asyncio.shield(flight.future),
-                timeout=deadline.remaining(),
+                timeout=_singleflight_wait_timeout(settings, deadline),
             )
             await cache_quota.refund_full()
             _enqueue_ledger(
@@ -1472,6 +1472,12 @@ def _deadline(settings: GatewayConfig) -> Deadline:
         inter_chunk_s=settings.timeouts.inter_chunk_s,
         total_deadline=loop.time() + settings.timeouts.total_s,
     )
+
+
+def _singleflight_wait_timeout(settings: GatewayConfig, deadline: Deadline) -> float:
+    wait_s = max(0.0, settings.cache.singleflight_wait_timeout_ms / 1000)
+    fallback_margin_s = max(0.0, settings.cache.singleflight_fallback_margin_ms / 1000)
+    return max(0.0, min(wait_s, deadline.remaining() - fallback_margin_s))
 
 
 def _unified_request(

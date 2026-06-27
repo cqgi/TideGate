@@ -107,6 +107,8 @@ cache:
   reject_patterns: ["无法回答", "作为AI", "抱歉"]
   replay_chunk_chars: 24
   replay_interval_ms: 15
+  singleflight_wait_timeout_ms: 300
+  singleflight_fallback_margin_ms: 50
 
 quota_plans:
   free:

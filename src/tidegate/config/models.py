@@ -178,6 +178,12 @@ class CacheConfig(FrozenModel):
     reject_patterns: tuple[str, ...] = ("无法回答", "作为AI", "抱歉")
     replay_chunk_chars: int = 24
     replay_interval_ms: int = 15
+    singleflight_wait_timeout_ms: int = Field(
+        default=300, description="Maximum time a follower waits for the leader result"
+    )
+    singleflight_fallback_margin_ms: int = Field(
+        default=50, description="Deadline budget kept for follower fallback attempts"
+    )
 
 
 class QuotaEstimatorConfig(FrozenModel):
