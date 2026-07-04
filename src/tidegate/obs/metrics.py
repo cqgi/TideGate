@@ -32,6 +32,7 @@ class Metrics:
     cascade: Counter
     hedge: Counter
     ledger_dropped: Counter
+    platform_cost: Counter
 
     @classmethod
     def create(cls) -> Metrics:
@@ -139,6 +140,12 @@ class Metrics:
             ledger_dropped=Counter(
                 "tidegate_ledger_dropped",
                 "Usage ledger records dropped before enqueue",
+                registry=registry,
+            ),
+            platform_cost=Counter(
+                "tidegate_platform_cost_microusd",
+                "Platform absorbed attempt cost in micro-USD",
+                ("tenant", "reason"),
                 registry=registry,
             ),
         )

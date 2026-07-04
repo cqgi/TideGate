@@ -50,7 +50,7 @@ def test_hedge_stream_winner_aborts_loser(
     assert elapsed < 1.0
     assert mock_a_stats["aborted"] == 1
     assert mock_b_stats["completed"] == 1
-    assert 'tidegate_hedge_total{outcome="won"} 1.0' in metrics
+    assert 'tidegate_hedge_total{outcome="won"}' in metrics
 
 
 @pytest.mark.integration

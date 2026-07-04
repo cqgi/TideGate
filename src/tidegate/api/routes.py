@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -47,7 +47,12 @@ from tidegate.routing.hedge import HedgeBudget, trigger_delay_s
 from tidegate.routing.ladder import RouteLevel, RoutingLadder
 from tidegate.routing.selector import NoAvailableDeployment, P2CSelector
 from tidegate.routing.stats import RoutingState
-from tidegate.settlement import LedgerBatcher, LedgerRecord
+from tidegate.settlement import (
+    AttemptLedgerBatcher,
+    AttemptLedgerRecord,
+    LedgerBatcher,
+    LedgerRecord,
+)
 
 router = APIRouter()
 
@@ -91,6 +96,14 @@ class _FirstDelta:
     provider_name: str
     deployment: DeploymentConfig
     is_hedge: bool
+    attempt_seq: int
+    kind: str
+
+
+@dataclass(frozen=True)
+class _HedgeRaceResult:
+    winner: _FirstDelta
+    loser: _FirstDelta | None
 
 
 @router.get("/healthz")
@@ -380,7 +393,9 @@ async def _render_stream_with_hedge(
     quota_settle: _QuotaSettlement,
     attempt_started_at: float,
     stream_state: _StreamAttemptState,
-) -> tuple[AsyncIterator[bytes], DeploymentConfig, bool]:
+    primary_attempt_seq: int,
+    primary_kind: str,
+) -> tuple[AsyncIterator[bytes], DeploymentConfig, bool, int, str]:
     settings: GatewayConfig = request.app.state.config_holder.current
     tenant: TenantConfig = request.state.tenant
     policy = settings.policies[tenant.policy]
@@ -407,6 +422,8 @@ async def _render_stream_with_hedge(
             ),
             primary.deployment,
             False,
+            primary_attempt_seq,
+            primary_kind,
         )
     if not hedge_budget.allow(policy.hedging):
         request.app.state.metrics.hedge.labels("skipped_budget").inc()
@@ -425,6 +442,8 @@ async def _render_stream_with_hedge(
             ),
             primary.deployment,
             False,
+            primary_attempt_seq,
+            primary_kind,
         )
     delay_s = trigger_delay_s(primary.deployment, _routing_state(request), policy.hedging)
     picked_hedge: _PickedAttempt | None = None
@@ -450,20 +469,26 @@ async def _render_stream_with_hedge(
             ),
             primary.deployment,
             False,
+            primary_attempt_seq,
+            primary_kind,
         )
-    first = await _first_delta_with_optional_hedge(
+    race = await _first_delta_with_optional_hedge(
         primary=_FirstDelta(
             delta=None,
             upstream=primary_upstream,
             provider_name=primary.deployment.provider,
             deployment=primary.deployment,
             is_hedge=False,
+            attempt_seq=primary_attempt_seq,
+            kind=primary_kind,
         ),
         hedge=picked_hedge,
+        hedge_seq_factory=lambda: _next_attempt_seq(request),
         delay_s=delay_s,
         unified=unified,
         deadline=deadline,
     )
+    first = race.winner
     if first.is_hedge:
         request.app.state.metrics.hedge.labels("won").inc()
         request.app.state.metrics.upstream_aborted.labels(
@@ -476,6 +501,20 @@ async def _render_stream_with_hedge(
             provider=picked_hedge.deployment.provider,
             reason="hedge_loser",
         ).inc()
+    if race.loser is not None:
+        _enqueue_attempt_record(
+            request,
+            _estimated_platform_attempt_record(
+                unified=unified,
+                quota_settle=quota_settle,
+                attempt_seq=race.loser.attempt_seq,
+                kind=race.loser.kind,
+                outcome="hedge_loser",
+                deployment=race.loser.deployment,
+                usage_source="estimated",
+                bearer_reason="hedge_loser",
+            ),
+        )
     return (
         _render_stream_from_first(
             request=request,
@@ -488,6 +527,8 @@ async def _render_stream_with_hedge(
         ),
         first.deployment,
         first.is_hedge,
+        first.attempt_seq,
+        first.kind,
     )
 
 
@@ -495,16 +536,27 @@ async def _first_delta_with_optional_hedge(
     *,
     primary: _FirstDelta,
     hedge: _PickedAttempt,
+    hedge_seq_factory: Callable[[], int],
     delay_s: float,
     unified: UnifiedRequest,
     deadline: Deadline,
-) -> _FirstDelta:
+) -> _HedgeRaceResult:
     primary_task = asyncio.create_task(_next_upstream_delta(primary.upstream))
     done, _ = await asyncio.wait({primary_task}, timeout=delay_s)
     if primary_task in done:
         primary.delta = primary_task.result()
-        return primary
+        return _HedgeRaceResult(primary, None)
+    hedge_seq = hedge_seq_factory()
     hedge_upstream = hedge.provider.stream_chat(unified, hedge.deployment.upstream_model, deadline)
+    hedge_first = _FirstDelta(
+        delta=None,
+        upstream=hedge_upstream,
+        provider_name=hedge.deployment.provider,
+        deployment=hedge.deployment,
+        is_hedge=True,
+        attempt_seq=hedge_seq,
+        kind="hedge",
+    )
     hedge_task = asyncio.create_task(_next_upstream_delta(hedge_upstream))
     done, pending = await asyncio.wait(
         {primary_task, hedge_task},
@@ -517,14 +569,12 @@ async def _first_delta_with_optional_hedge(
     if winner is primary_task:
         await _close_iterator(hedge_upstream)
         primary.delta = winner.result()
-        return primary
+        return _HedgeRaceResult(primary, hedge_first)
     await _close_iterator(primary.upstream)
-    return _FirstDelta(
-        delta=winner.result(),
-        upstream=hedge_upstream,
-        provider_name=hedge.deployment.provider,
-        deployment=hedge.deployment,
-        is_hedge=True,
+    hedge_first.delta = winner.result()
+    return _HedgeRaceResult(
+        hedge_first,
+        primary,
     )
 
 
@@ -643,6 +693,8 @@ async def _stream_with_retries(
                 last_error = GatewayError("quota reservation missing", ErrorCategory.INTERNAL)
                 break
             route_header = _route_header(deployment)
+            attempt_seq = _next_attempt_seq(request)
+            attempt_kind = "primary" if attempt_count == 1 else "retry"
             attempt_started_at = time.monotonic()
             stream_state = _StreamAttemptState(cacheable_content=[])
             try:
@@ -652,7 +704,13 @@ async def _stream_with_retries(
                 continue
             sent_data = False
             try:
-                body_iterator, winning_deployment, _ = await _render_stream_with_hedge(
+                (
+                    body_iterator,
+                    winning_deployment,
+                    _,
+                    winning_attempt_seq,
+                    winning_kind,
+                ) = await _render_stream_with_hedge(
                     request=request,
                     unified=unified,
                     primary=picked,
@@ -664,6 +722,8 @@ async def _stream_with_retries(
                     quota_settle=quota_settle,
                     attempt_started_at=attempt_started_at,
                     stream_state=stream_state,
+                    primary_attempt_seq=attempt_seq,
+                    primary_kind=attempt_kind,
                 )
                 deployment = winning_deployment
                 route_header = _route_header(deployment)
@@ -684,6 +744,16 @@ async def _stream_with_retries(
                 if picked.degraded is not None:
                     outcome = "degraded"
                 if accounting.usage is not None:
+                    _enqueue_attempt_record(
+                        request,
+                        _delivered_attempt_record(
+                            unified=unified,
+                            usage=accounting.usage,
+                            attempt_seq=winning_attempt_seq,
+                            kind=winning_kind,
+                            deployment=deployment,
+                        ),
+                    )
                     response = UnifiedResponse(
                         content="".join(stream_state.cacheable_content),
                         finish_reason=stream_state.finish_reason or "stop",
@@ -730,6 +800,17 @@ async def _stream_with_retries(
                 return
             except GatewayError as exc:
                 last_error = exc
+                _enqueue_attempt_record(
+                    request,
+                    _failed_attempt_record(
+                        unified=unified,
+                        quota_settle=quota_settle,
+                        attempt_seq=attempt_seq,
+                        kind=attempt_kind,
+                        deployment=deployment,
+                        exc=exc,
+                    ),
+                )
                 _record_route_error(
                     request,
                     deployment,
@@ -1041,6 +1122,8 @@ async def _call_non_stream_upstream(
                     snapshot=settings,
                 )
             quota_settle.use_deployment(deployment)
+            attempt_seq = _next_attempt_seq(request)
+            attempt_kind = "primary" if attempt_seq == 0 else "retry"
             attempt_started_at = time.monotonic()
             try:
                 routing_state.record_start(deployment, now_s=time.monotonic())
@@ -1063,6 +1146,16 @@ async def _call_non_stream_upstream(
                     now_s=time.monotonic(),
                 )
                 result = _ChatResult(response, route_header, cache_header, picked.degraded)
+                _enqueue_attempt_record(
+                    request,
+                    _delivered_attempt_record(
+                        unified=unified,
+                        usage=response.usage,
+                        attempt_seq=attempt_seq,
+                        kind=attempt_kind,
+                        deployment=deployment,
+                    ),
+                )
                 _enqueue_ledger(
                     request,
                     unified=unified,
@@ -1088,6 +1181,17 @@ async def _call_non_stream_upstream(
             except GatewayError as exc:
                 if quota_settle is None:
                     raise GatewayError("quota settlement missing", ErrorCategory.INTERNAL) from exc
+                _enqueue_attempt_record(
+                    request,
+                    _failed_attempt_record(
+                        unified=unified,
+                        quota_settle=quota_settle,
+                        attempt_seq=attempt_seq,
+                        kind=attempt_kind,
+                        deployment=deployment,
+                        exc=exc,
+                    ),
+                )
                 await quota_settle.settle_once(None, 0)
                 quota_settle = None
                 last_error = exc
@@ -1220,6 +1324,10 @@ def _ledger(request: Request) -> LedgerBatcher:
     return cast(LedgerBatcher, request.app.state.ledger)
 
 
+def _attempt_ledger(request: Request) -> AttemptLedgerBatcher:
+    return cast(AttemptLedgerBatcher, request.app.state.attempt_ledger)
+
+
 def _cache_service(request: Request) -> CacheService:
     return cast(CacheService, request.app.state.cache)
 
@@ -1308,6 +1416,112 @@ async def _flush_ledger(
     )
 
 
+def _enqueue_attempt_record(request: Request, record: AttemptLedgerRecord) -> None:
+    if not hasattr(request.app.state, "attempt_ledger"):
+        return
+    if record.cost_platform_microusd > 0 and record.bearer_reason is not None:
+        request.app.state.metrics.platform_cost.labels(
+            record.tenant_id,
+            record.bearer_reason,
+        ).inc(record.cost_platform_microusd)
+    _attempt_ledger(request).enqueue(record)
+
+
+def _delivered_attempt_record(
+    *,
+    unified: UnifiedRequest,
+    usage: Usage,
+    attempt_seq: int,
+    kind: str,
+    deployment: DeploymentConfig,
+) -> AttemptLedgerRecord:
+    return AttemptLedgerRecord(
+        request_id=unified.request_id,
+        attempt_seq=attempt_seq,
+        tenant_id=unified.tenant_id,
+        kind=kind,
+        outcome="delivered",
+        provider=deployment.provider,
+        upstream_model=deployment.upstream_model,
+        prompt_tokens=usage.prompt_tokens,
+        completion_tokens=usage.completion_tokens,
+        usage_source="actual",
+        cost_tenant_microusd=_usage_cost_microusd(usage, deployment),
+        cost_platform_microusd=0,
+        bearer_reason=None,
+    )
+
+
+def _estimated_platform_attempt_record(
+    *,
+    unified: UnifiedRequest,
+    quota_settle: _QuotaSettlement,
+    attempt_seq: int,
+    kind: str,
+    outcome: str,
+    deployment: DeploymentConfig,
+    usage_source: str,
+    bearer_reason: str,
+    error_category: str | None = None,
+) -> AttemptLedgerRecord:
+    prompt_tokens = quota_settle.estimate_prompt_tokens
+    return AttemptLedgerRecord(
+        request_id=unified.request_id,
+        attempt_seq=attempt_seq,
+        tenant_id=unified.tenant_id,
+        kind=kind,
+        outcome=outcome,
+        provider=deployment.provider,
+        upstream_model=deployment.upstream_model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=0,
+        usage_source=usage_source,
+        cost_tenant_microusd=0,
+        cost_platform_microusd=_prompt_cost_microusd(prompt_tokens, deployment),
+        bearer_reason=bearer_reason,
+        error_category=error_category,
+    )
+
+
+def _failed_attempt_record(
+    *,
+    unified: UnifiedRequest,
+    quota_settle: _QuotaSettlement,
+    attempt_seq: int,
+    kind: str,
+    deployment: DeploymentConfig,
+    exc: GatewayError,
+) -> AttemptLedgerRecord:
+    if exc.category == ErrorCategory.TIMEOUT_TTFT:
+        return _estimated_platform_attempt_record(
+            unified=unified,
+            quota_settle=quota_settle,
+            attempt_seq=attempt_seq,
+            kind=kind,
+            outcome="failed",
+            deployment=deployment,
+            usage_source="estimated",
+            bearer_reason="retry_failed",
+            error_category=exc.category.value,
+        )
+    return AttemptLedgerRecord(
+        request_id=unified.request_id,
+        attempt_seq=attempt_seq,
+        tenant_id=unified.tenant_id,
+        kind=kind,
+        outcome="failed",
+        provider=deployment.provider,
+        upstream_model=deployment.upstream_model,
+        prompt_tokens=0,
+        completion_tokens=0,
+        usage_source="actual",
+        cost_tenant_microusd=0,
+        cost_platform_microusd=0,
+        bearer_reason=None,
+        error_category=exc.category.value,
+    )
+
+
 def _ledger_record(
     *,
     unified: UnifiedRequest,
@@ -1362,6 +1576,17 @@ def _usage_cost_microusd(usage: Usage, deployment: DeploymentConfig) -> int:
     return max(0, round(cost * 1_000_000))
 
 
+def _prompt_cost_microusd(prompt_tokens: int, deployment: DeploymentConfig) -> int:
+    cost = prompt_tokens / 1000 * deployment.price_per_1k_input_usd
+    return max(0, round(cost * 1_000_000))
+
+
+def _next_attempt_seq(request: Request) -> int:
+    current = cast(int, getattr(request.state, "attempt_seq_next", 0))
+    request.state.attempt_seq_next = current + 1
+    return current
+
+
 def _degraded_header(degraded: str | None) -> dict[str, str]:
     if degraded is None:
         return {}
@@ -1386,6 +1611,10 @@ class _QuotaSettlement:
         self._quota = quota
         self._settled = False
         self._usage: Usage | None = None
+
+    @property
+    def estimate_prompt_tokens(self) -> int:
+        return self._reservation.estimate.prompt_tokens
 
     def capture_usage(self, usage: Usage | None) -> None:
         self._usage = usage

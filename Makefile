@@ -5,7 +5,7 @@ RUN ?= $(UV) run --extra dev --extra test
 PYTHON ?= $(RUN) python
 RUFF ?= $(RUN) ruff
 MYPY ?= $(PYTHON) -m mypy
-PYTEST ?= $(RUN) pytest
+PYTEST ?= $(PYTHON) -m pytest
 
 dev:
 	@set -e; \

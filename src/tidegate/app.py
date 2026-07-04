@@ -40,7 +40,7 @@ from tidegate.routing.hedge import HedgeBudget
 from tidegate.routing.reporter import prewarm_from_aggregate, report_loop
 from tidegate.routing.selector import P2CSelector
 from tidegate.routing.stats import RoutingState
-from tidegate.settlement import LedgerBatcher
+from tidegate.settlement import AttemptLedgerBatcher, LedgerBatcher
 
 
 @dataclass
@@ -161,6 +161,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
             metrics,
         )
         ledger = LedgerBatcher(pg_pool, current.settlement, metrics)
+        attempt_ledger = AttemptLedgerBatcher(pg_pool, current.settlement, metrics)
         app.state.config_holder = holder
         app.state.metrics = metrics
         app.state.provider_manager = provider_manager
@@ -174,6 +175,7 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
         app.state.embedding_service = embedding_service
         app.state.cache = cache_service
         app.state.ledger = ledger
+        app.state.attempt_ledger = attempt_ledger
         app.state.routing_state = routing_state
         app.state.selector = selector
         app.state.hedge_budget = HedgeBudget()
@@ -214,11 +216,17 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
                 )
             if pg_pool is not None:
                 task_registry.create(ledger.run(), name="tidegate-ledger-batcher")
+                task_registry.create(
+                    attempt_ledger.run(),
+                    name="tidegate-attempt-ledger-batcher",
+                )
         try:
             yield
         finally:
             await app.state.active_streams.drain(settings.settlement.drain_timeout_s)
             await task_registry.drain()
+            await attempt_ledger.drain()
+            attempt_ledger.close()
             await ledger.drain()
             ledger.close()
             await provider_manager.close()
@@ -242,4 +250,8 @@ def create_app(settings: GatewayConfig, config_path: str | Path = "config/gatewa
 
 
 def _ledger_schema_sql() -> str:
-    return Path("deploy/sql/001_usage_ledger.sql").read_text(encoding="utf-8")
+    return (
+        Path("deploy/sql/001_usage_ledger.sql").read_text(encoding="utf-8")
+        + "\n"
+        + Path("deploy/sql/002_attempt_ledger.sql").read_text(encoding="utf-8")
+    )

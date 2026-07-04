@@ -14,6 +14,7 @@ def test_metrics_contract_names_and_labels() -> None:
     metrics.breaker_state.labels("mock-a", "mock-gpt-large").set(2)
     metrics.breaker_transitions.labels("mock-a", "mock-gpt-large", "open").inc()
     metrics.cache_events.labels("l1", "hit").inc()
+    metrics.platform_cost.labels("demo", "hedge_loser").inc(1)
     body, content_type = metrics.render()
     rendered = body.decode()
     assert content_type == CONTENT_TYPE_LATEST
@@ -32,3 +33,6 @@ def test_metrics_contract_names_and_labels() -> None:
         'to_state="open"} 1.0' in rendered
     )
     assert 'tidegate_cache_events_total{event="hit",level="l1"} 1.0' in rendered
+    assert (
+        'tidegate_platform_cost_microusd_total{reason="hedge_loser",tenant="demo"} 1.0' in rendered
+    )
