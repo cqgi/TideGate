@@ -57,7 +57,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         gateway_metrics = await _read_gateway_metrics(client, args.url)
 
     rows = [row for row in results if isinstance(row, dict)]
-    errors = [str(row) for row in results if not isinstance(row, dict)]
+    errors = [row for row in results if not isinstance(row, dict)]
     ttfts = [_float(row.get("ttft_ms")) for row in rows if row.get("ok")]
     e2e = [_float(row.get("e2e_ms")) for row in rows if row.get("ok")]
     hit_ttfts = [
@@ -70,6 +70,7 @@ async def main(argv: Sequence[str] | None = None) -> None:
         "requests": sent,
         "completed": len(rows),
         "errors": len(errors),
+        "errors_by_category": _errors_by_category(rows, errors),
         "success_rate": sum(1 for row in rows if row.get("ok")) / max(1, len(rows)),
         "ttft_ms": _percentiles(ttfts),
         "e2e_ms": _percentiles(e2e),
@@ -106,19 +107,94 @@ async def _one(
     }
     started = time.monotonic()
     first_byte: float | None = None
-    async with client.stream("POST", args.url, headers=headers, json=body) as response:
-        async for chunk in response.aiter_bytes():
-            if first_byte is None and chunk:
-                first_byte = time.monotonic()
-        ended = time.monotonic()
+    try:
+        async with client.stream("POST", args.url, headers=headers, json=body) as response:
+            saw_done = not stream
+            async for chunk in response.aiter_bytes():
+                if first_byte is None and chunk:
+                    first_byte = time.monotonic()
+                if stream and b"[DONE]" in chunk:
+                    saw_done = True
+            ended = time.monotonic()
+    except Exception as exc:
+        raise _LoadgenRequestError(_categorize_exception(exc), str(exc)) from exc
+
+    error_category = _response_error_category(response.status_code, stream, saw_done)
     return {
-        "ok": response.status_code == 200,
+        "ok": error_category is None,
         "status_code": response.status_code,
         "cache_header": response.headers.get("X-TideGate-Cache"),
         "route_header": response.headers.get("X-TideGate-Route"),
         "ttft_ms": ((first_byte or ended) - started) * 1000,
         "e2e_ms": (ended - started) * 1000,
+        "error_category": error_category,
+        "error_message": None if error_category is None else f"status={response.status_code}",
     }
+
+
+class _LoadgenRequestError(Exception):
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(message)
+        self.category = category
+
+
+def _categorize_exception(exc: Exception) -> str:
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(exc, httpx.ConnectError):
+        return "connect_error"
+    if isinstance(exc, httpx.ReadTimeout | httpx.ReadError | httpx.RemoteProtocolError):
+        return "read_timeout"
+    if isinstance(exc, httpx.TimeoutException):
+        return "read_timeout"
+    return "other"
+
+
+def _response_error_category(status_code: int, stream: bool, saw_done: bool) -> str | None:
+    if 400 <= status_code < 500:
+        return f"http_4xx_{status_code}"
+    if 500 <= status_code < 600:
+        return f"http_5xx_{status_code}"
+    if stream and status_code == 200 and not saw_done:
+        return "incomplete_stream"
+    if status_code != 200:
+        return "other"
+    return None
+
+
+def _errors_by_category(
+    rows: Sequence[dict[str, float | int | bool | str | None]],
+    errors: Sequence[BaseException],
+) -> dict[str, dict[str, object]]:
+    summary: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if row.get("ok"):
+            continue
+        category = str(row.get("error_category") or "other")
+        message = str(row.get("error_message") or f"status={row.get('status_code')}")
+        _add_error_sample(summary, category, message)
+    for error in errors:
+        if isinstance(error, _LoadgenRequestError):
+            category = error.category
+            message = str(error)
+        else:
+            category = "other"
+            message = str(error)
+        _add_error_sample(summary, category, message)
+    return summary
+
+
+def _add_error_sample(
+    summary: dict[str, dict[str, object]],
+    category: str,
+    message: str,
+) -> None:
+    bucket = summary.setdefault(category, {"count": 0, "samples": []})
+    count = bucket.get("count", 0)
+    bucket["count"] = (count if isinstance(count, int) else 0) + 1
+    samples = bucket["samples"]
+    if isinstance(samples, list) and len(samples) < 3:
+        samples.append(message[:200])
 
 
 def _mock_directive(args: argparse.Namespace) -> dict[str, object]:

@@ -31,7 +31,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "mypy>=1.19.0",
+    "psutil>=7.2.2",
     "ruff>=0.14.0",
+    "types-psutil>=7.2.2.20260518",
 ]
 test = [
     "hypothesis>=6.148.0",
